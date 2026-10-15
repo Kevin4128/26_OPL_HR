@@ -15,7 +15,7 @@ public:
   ~ScopedTiming() {
     const double ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - start_).count();
-    RCLCPP_INFO(rclcpp::get_logger("vision_timing"), "[timing] %s wall_ms=%.3f", module_, ms);
+    RCLCPP_DEBUG(rclcpp::get_logger("vision_timing"), "[timing] %s wall_ms=%.3f", module_, ms);
   }
 
 private:

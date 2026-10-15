@@ -20,6 +20,7 @@ HumanTrackerNode::HumanTrackerNode(
     "human_tracker_node",
     options)
 {
+  cv::setNumThreads(declare_parameter<int>("opencv_threads", 1));
   declare_parameter<std::string>(
     "image_topic",
     "camera/image_raw"
@@ -285,7 +286,7 @@ HumanTrackerNode::on_configure(
       opl_interfaces::msg::TrackedHumanArray
     >(
       tracked_topic_,
-      rclcpp::SensorDataQoS()
+      rclcpp::SensorDataQoS().keep_last(1)
     );
 
 
@@ -357,7 +358,7 @@ HumanTrackerNode::on_activate(
       sensor_msgs::msg::Image
     >(
       image_topic_,
-      rclcpp::SensorDataQoS(),
+      rclcpp::SensorDataQoS().keep_last(1),
       std::bind(
         &HumanTrackerNode::imageCallback,
         this,
@@ -423,7 +424,7 @@ HumanTrackerNode::on_activate(
       sensor_msgs::msg::CameraInfo
     >(
       info_topic,
-      rclcpp::SensorDataQoS(),
+      rclcpp::SensorDataQoS().keep_last(1),
       std::bind(
         &HumanTrackerNode::cameraInfoCallback,
         this,
@@ -450,7 +451,7 @@ HumanTrackerNode::on_activate(
       sensor_msgs::msg::Image
     >(
       depth_topic_,
-      rclcpp::SensorDataQoS(),
+      rclcpp::SensorDataQoS().keep_last(1),
       std::bind(
         &HumanTrackerNode::depthCallback,
         this,
@@ -477,7 +478,7 @@ HumanTrackerNode::on_activate(
       opl_interfaces::msg::TrackedHumanArray
     >(
       detections_topic_,
-      rclcpp::SensorDataQoS(),
+      rclcpp::SensorDataQoS().keep_last(1),
       std::bind(
         &HumanTrackerNode::detectionsCallback,
         this,
@@ -1153,7 +1154,7 @@ void HumanTrackerNode::detectionsCallback(
   }
 
 
-  RCLCPP_INFO(
+  RCLCPP_DEBUG(
     rclcpp::get_logger(
       "vision_timing"
     ),

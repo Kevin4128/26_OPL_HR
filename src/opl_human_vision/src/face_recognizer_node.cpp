@@ -15,6 +15,7 @@ namespace opl_human_vision {
 FaceRecognizerNode::FaceRecognizerNode(const rclcpp::NodeOptions & options)
 : rclcpp_lifecycle::LifecycleNode("face_recognizer_node", options)
 {
+  cv::setNumThreads(declare_parameter<int>("opencv_threads", 1));
   declare_parameter<std::string>("image_topic", "/image_raw");
   declare_parameter<std::string>("tracked_topic", "tracked_humans");
   declare_parameter<std::string>("recognized_topic", "recognized_humans");
@@ -158,7 +159,7 @@ FaceRecognizerNode::on_configure(const rclcpp_lifecycle::State &)
   recognized_pub_ =
     create_publisher<opl_interfaces::msg::TrackedHumanArray>(
       recognized_topic_,
-      rclcpp::SensorDataQoS()
+      rclcpp::SensorDataQoS().keep_last(1)
     );
 
 
@@ -221,7 +222,7 @@ FaceRecognizerNode::on_activate(
   image_sub_ =
     create_subscription<sensor_msgs::msg::Image>(
       image_topic_,
-      rclcpp::SensorDataQoS(),
+      rclcpp::SensorDataQoS().keep_last(1),
       std::bind(
         &FaceRecognizerNode::imageCallback,
         this,
@@ -243,7 +244,7 @@ FaceRecognizerNode::on_activate(
   tracked_sub_ =
     create_subscription<opl_interfaces::msg::TrackedHumanArray>(
       tracked_topic_,
-      rclcpp::SensorDataQoS(),
+      rclcpp::SensorDataQoS().keep_last(1),
       std::bind(
         &FaceRecognizerNode::trackedHumansCallback,
         this,
@@ -331,14 +332,15 @@ void FaceRecognizerNode::handleEnrollService(
   }
 
 
-  if (target_id == 0) {
-
-    response->success = false;
-
-    response->message =
-      "No active track found to authorize enrollment.";
-
-    return;
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (target_id == 0 || last_active_raw_ids_.count(target_id) == 0) {
+      response->success = false;
+      response->message =
+        "No active raw track with this ID. Use the ID shown in the visualizer "
+        "or raw_track_id=0 to select an active track.";
+      return;
+    }
   }
 
 
@@ -397,7 +399,7 @@ void FaceRecognizerNode::imageCallback(
 
     frame_buffer_.emplace_back(
       rclcpp::Time(msg->header.stamp),
-      cv_ptr->image
+      cv_ptr->image.clone()
     );
 
 
@@ -452,7 +454,7 @@ void FaceRecognizerNode::trackedHumansCallback(
 
     if (frame_buffer_.empty()) {
 
-      RCLCPP_INFO(
+      RCLCPP_DEBUG(
         rclcpp::get_logger("vision_timing"),
         "[timing] Recognizer skipped: image buffer empty"
       );
@@ -507,7 +509,7 @@ void FaceRecognizerNode::trackedHumansCallback(
     frame_ref.empty() ||
     min_diff > 0.10)
   {
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       rclcpp::get_logger("vision_timing"),
       "[timing] Recognizer skipped: "
       "no image within 100ms, nearest_diff_ms=%.3f",

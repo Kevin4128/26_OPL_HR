@@ -39,9 +39,13 @@ class LifecycleActivator(Node):
         # Give container a moment to initialize the nodes
         time.sleep(2.0)
 
+        # Finish loading every engine before camera callbacks start inference.
+        # Otherwise later engine initialization competes with an active detector.
+        configured = []
         for node_name in self.nodes_to_activate:
-            if not self.transition_node(node_name, Transition.TRANSITION_CONFIGURE, "configured"):
-                continue
+            if self.transition_node(node_name, Transition.TRANSITION_CONFIGURE, "configured"):
+                configured.append(node_name)
+        for node_name in configured:
             self.transition_node(node_name, Transition.TRANSITION_ACTIVATE, "activated")
 
 def main(args=None):

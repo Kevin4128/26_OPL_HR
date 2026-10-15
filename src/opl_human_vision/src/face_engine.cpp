@@ -498,7 +498,7 @@ FaceResult FaceEngine::processFace(
   const cv::Mat& human_crop,
   uint64_t raw_track_id,
   const std::set<uint64_t>& occupied_ids,
-  const geometry_msgs::msg::Point& position_3d),
+  const geometry_msgs::msg::Point& position_3d,
   bool force_deep_reid)
 {
   ScopedTiming timing(

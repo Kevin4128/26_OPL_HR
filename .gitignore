@@ -2,6 +2,7 @@
 .vscode/
 
 models/
+laptop_models/
 
 build/
 install/

@@ -8,6 +8,16 @@ import cv2
 import numpy as np
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, qos_profile_sensor_data
 
+def person_label(human):
+    # IDs below the session namespace are enrolled identities. Raw IDs remain
+    # visible because the enrollment service specifically accepts raw_track_id.
+    raw_id = human.raw_track_id if human.raw_track_id > 0 else human.track_id
+    named = human.name.lower() not in ('', 'unknown', 'unregistered') and 'scanning' not in human.name.lower()
+    enrolled = named and 0 < human.track_id < 1000000000
+    display_id = human.track_id if enrolled else raw_id
+    raw_suffix = f" (raw:{raw_id})" if enrolled else ''
+    return f"ID:{display_id}{raw_suffix} | {human.name} ({human.confidence:.2f})"
+
 class PipelineVisualizer(Node):
     def __init__(self):
         super().__init__('pipeline_visualizer')
@@ -118,7 +128,7 @@ class PipelineVisualizer(Node):
                         cv2.circle(display_frame, (cx, cy), 3, (0, 0, 255), cv2.FILLED)
 
                 # --- CONSTRUCT LABEL WITH DEPTH ---
-                label = f"ID:{human.track_id} | {human.name} ({human.confidence:.2f})"
+                label = person_label(human)
 
                 if self.show_depth and hasattr(human, 'position_3d'):
                     z_dist = human.position_3d.z

@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.18)
 project(opl_human_vision)
 
+# Single-config colcon builds otherwise default to unoptimized CPU code.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 20)
 endif()
@@ -77,8 +82,9 @@ rclcpp_components_register_node(human_detector_node PLUGIN "opl_human_vision::Hu
 add_library(human_tracker_node SHARED
   src/human_tracker_node.cpp
   src/tracker_engine.cpp
+  src/osnet_extractor.cpp
 )
-target_link_libraries(human_tracker_node ${OpenCV_LIBS})
+target_link_libraries(human_tracker_node ${TRT_LIBRARIES} ${OpenCV_LIBS})
 ament_target_dependencies(human_tracker_node rclcpp rclcpp_components rclcpp_lifecycle sensor_msgs cv_bridge opl_interfaces)
 rclcpp_components_register_node(human_tracker_node PLUGIN "opl_human_vision::HumanTrackerNode" EXECUTABLE human_tracker_node_exe)
 
@@ -111,7 +117,7 @@ install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
 
-foreach(directory config models)
+foreach(directory config models laptop_models)
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${directory}")
     install(DIRECTORY ${directory} DESTINATION share/${PROJECT_NAME})
   endif()
@@ -128,5 +134,18 @@ install(PROGRAMS
 # Export include directories and libraries for dependent packages
 ament_export_include_directories(include)
 ament_export_libraries(human_detector_node human_tracker_node face_recognizer_node)
+
+if(BUILD_TESTING)
+  enable_testing()
+  add_executable(test_pose_nms test/test_pose_nms.cpp)
+  target_link_libraries(test_pose_nms ${OpenCV_LIBS})
+  target_compile_options(test_pose_nms PRIVATE -UNDEBUG)
+  add_test(NAME pose_nms COMMAND test_pose_nms)
+  add_executable(test_tracker_occlusion test/test_tracker_occlusion.cpp)
+  target_link_libraries(test_tracker_occlusion human_tracker_node ${TRT_LIBRARIES} ${OpenCV_LIBS})
+  ament_target_dependencies(test_tracker_occlusion opl_interfaces)
+  target_compile_options(test_tracker_occlusion PRIVATE -UNDEBUG)
+  add_test(NAME tracker_occlusion COMMAND test_tracker_occlusion)
+endif()
 
 ament_package()

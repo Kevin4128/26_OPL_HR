@@ -1,4 +1,5 @@
 #include "opl_human_vision/human_detector_node.hpp"
+#include "opl_human_vision/pose_nms.hpp"
 #include "opl_human_vision/scoped_timing.hpp"
 #include "rclcpp_components/register_node_macro.hpp"
 #include <algorithm>
@@ -9,6 +10,7 @@ namespace opl_human_vision {
 
 HumanDetectorNode::HumanDetectorNode(const rclcpp::NodeOptions & options)
 : rclcpp_lifecycle::LifecycleNode("human_detector_node", options) {
+  cv::setNumThreads(declare_parameter<int>("opencv_threads", 1));
   declare_parameter<std::string>("image_topic", "camera/image_raw");
   declare_parameter<std::string>("detections_topic", "raw_detections");
   declare_parameter<std::string>("model_path", "");
@@ -154,7 +156,7 @@ HumanDetectorNode::on_configure(const rclcpp_lifecycle::State &) {
   }
 
   detection_pub_ = create_publisher<opl_interfaces::msg::TrackedHumanArray>(
-    detections_topic_, rclcpp::SensorDataQoS()
+    detections_topic_, rclcpp::SensorDataQoS().keep_last(1)
   );
 
   return CallbackReturn::SUCCESS;
@@ -174,7 +176,7 @@ HumanDetectorNode::on_activate(const rclcpp_lifecycle::State & state) {
 
   image_sub_ = create_subscription<sensor_msgs::msg::Image>(
     image_topic_,
-    rclcpp::SensorDataQoS(),
+    rclcpp::SensorDataQoS().keep_last(1),
     std::bind(&HumanDetectorNode::imageCallback, this, std::placeholders::_1),
     sub_options
   );
@@ -287,8 +289,7 @@ void HumanDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
     }
 
     // 5. NMS (Non-Maximum Suppression)
-    std::vector<int> indices;
-    cv::dnn::NMSBoxes(bboxes, confidences, conf_thresh_, nms_thresh_, indices);
+    const auto indices = poseNms(bboxes, confidences, keypoints_list, nms_thresh_);
 
     opl_interfaces::msg::TrackedHumanArray detections_msg;
     detections_msg.header = msg->header;
@@ -348,7 +349,7 @@ void HumanDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
     }
 
     detection_pub_->publish(detections_msg);
-    RCLCPP_INFO(rclcpp::get_logger("vision_timing"),
+    RCLCPP_DEBUG(rclcpp::get_logger("vision_timing"),
       "[timing] YOLO frame=%d.%09u detections=%zu",
       msg->header.stamp.sec, msg->header.stamp.nanosec, detections_msg.humans.size());
 

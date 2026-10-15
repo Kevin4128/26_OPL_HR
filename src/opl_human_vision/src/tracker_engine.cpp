@@ -1955,6 +1955,17 @@ std::vector<Track> TrackerEngine::update(
     }
 
 
+    // An overlapping crop may include the other person's clothing. Do not
+    // contaminate this track's appearance gallery while people cross.
+    bool clean_appearance_crop = true;
+    for (std::size_t other = 0; other < detection_count; ++other) {
+      if (other != det_idx && computeIoU(detectionBox(detections[det_idx]),
+          detectionBox(detections[other])) > 0.25f) {
+        clean_appearance_crop = false;
+        break;
+      }
+    }
+
     applyDetectionToTrack(
       active_tracks_[
         track_idx
@@ -1965,9 +1976,7 @@ std::vector<Track> TrackerEngine::update(
       frame,
       timestamp_sec,
 
-      // Normal geometric match:
-      // appearance may be refreshed at low cadence.
-      true
+      clean_appearance_crop
     );
 
 
