@@ -14,6 +14,8 @@ find_package(sensor_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TrackedHuman.msg"
   "msg/TrackedHumanArray.msg"
+  "msg/DetectedObject.msg"
+  "msg/DetectedObjectArray.msg"
   "srv/EnrollPerson.srv"
   DEPENDENCIES std_msgs geometry_msgs sensor_msgs
 )

@@ -3,7 +3,7 @@
 <package format="3">
   <name>opl_human_vision</name>
   <version>0.0.1</version>
-  <description>Composable lifecycle nodes for human detection, tracking, and face recognition using CUDA/TensorRT</description>
+  <description>Composable human detection using CUDA/TensorRT</description>
   <maintainer email="jupiterx0326@gmail.com">user</maintainer>
   <license>Apache-2.0</license>
 
@@ -18,6 +18,15 @@
   <depend>cv_bridge</depend>
   <depend>image_transport</depend>
   <depend>opl_interfaces</depend>
+  <depend>vision_msgs</depend>
+  <depend>message_filters</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

@@ -5,6 +5,11 @@ if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 20)
 endif()
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_wrist_perception test/test_wrist_perception.py)
+endif()
+
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
@@ -23,6 +28,7 @@ find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(opl_interfaces REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(vision_msgs REQUIRED)
 
 # Search TensorRT & CUDA paths
 set(TRT_SEARCH_PATHS
@@ -94,6 +100,11 @@ target_link_libraries(face_recognizer_node ${TRT_LIBRARIES} ${OpenCV_LIBS})
 ament_target_dependencies(face_recognizer_node rclcpp rclcpp_components rclcpp_lifecycle sensor_msgs cv_bridge opl_interfaces)
 rclcpp_components_register_node(face_recognizer_node PLUGIN "opl_human_vision::FaceRecognizerNode" EXECUTABLE face_recognizer_node_exe)
 
+# Head-camera furniture detector using a dedicated COCO-pretrained YOLO11m engine.
+add_executable(head_cam_object_detector src/object_detector_node.cpp)
+target_link_libraries(head_cam_object_detector ${TRT_LIBRARIES} ${OpenCV_LIBS})
+ament_target_dependencies(head_cam_object_detector rclcpp sensor_msgs cv_bridge vision_msgs)
+
 # ------------------------------------------------------------------------------
 # Installation Rules
 # ------------------------------------------------------------------------------
@@ -101,6 +112,10 @@ install(TARGETS human_detector_node human_tracker_node face_recognizer_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
+)
+
+install(TARGETS head_cam_object_detector
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
 install(DIRECTORY include/
@@ -114,9 +129,12 @@ install(DIRECTORY launch config models
 install(PROGRAMS
   scripts/webcam_publisher.py
   scripts/visualizer.py
+  scripts/object_visualizer.py
   scripts/lifecycle_activator.py
+  scripts/wrist_object_fusion.py
   DESTINATION lib/${PROJECT_NAME}
 )
+install(FILES scripts/wrist_perception.py DESTINATION lib/${PROJECT_NAME})
 
 # Export include directories and libraries for dependent packages
 ament_export_include_directories(include)

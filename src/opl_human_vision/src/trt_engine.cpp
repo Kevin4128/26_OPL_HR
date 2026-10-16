@@ -106,6 +106,7 @@ bool TrtEngine::loadEngine() {
   context_->setTensorAddress(input_name_.c_str(), gpu_input_buffer_);
   context_->setTensorAddress(output_name_.c_str(), gpu_output_buffer_);
 
+  loaded_ = true;
   return true;
 #else
   std::cout << "[TrtEngine] Running CPU Mode: Using OpenCV HOG People Detector." << std::endl;
@@ -119,63 +120,41 @@ void TrtEngine::preprocess(const cv::Mat& frame) {
       frame, 1.0 / 255.0, cv::Size(input_w_, input_h_),
       cv::Scalar(0, 0, 0), true, false
   );
-
   cudaMemcpyAsync(gpu_input_buffer_, blob.ptr<float>(), input_size_, cudaMemcpyHostToDevice, stream_);
 }
 
 std::vector<Detection> TrtEngine::postprocess(const cv::Size& original_shape) {
   std::vector<Detection> detections;
   std::vector<cv::Rect> boxes;
-  std::vector<float> confs;
-
-  float x_factor = static_cast<float>(original_shape.width) / input_w_;
-  float y_factor = static_cast<float>(original_shape.height) / input_h_;
-
-  // COCO format: Person is class 0 -> Channel index 4 in both YOLOv8 standard (4..83) and Pose (4)
-  const int person_class_offset = 4;
+  std::vector<float> confidences;
+  const float scale_x = static_cast<float>(original_shape.width) / input_w_;
+  const float scale_y = static_cast<float>(original_shape.height) / input_h_;
 
   for (int i = 0; i < num_anchors_; ++i) {
-    float person_conf = cpu_output_buffer_[person_class_offset * num_anchors_ + i];
-
-    if (person_conf > conf_thresh_) {
-      float cx = cpu_output_buffer_[0 * num_anchors_ + i];
-      float cy = cpu_output_buffer_[1 * num_anchors_ + i];
-      float w  = cpu_output_buffer_[2 * num_anchors_ + i];
-      float h  = cpu_output_buffer_[3 * num_anchors_ + i];
-
-      int left   = static_cast<int>((cx - 0.5f * w) * x_factor);
-      int top    = static_cast<int>((cy - 0.5f * h) * y_factor);
-      int right  = static_cast<int>((cx + 0.5f * w) * x_factor);
-      int bottom = static_cast<int>((cy + 0.5f * h) * y_factor);
-
-      left   = std::max(0, std::min(left, original_shape.width - 1));
-      top    = std::max(0, std::min(top, original_shape.height - 1));
-      right  = std::max(0, std::min(right, original_shape.width - 1));
-      bottom = std::max(0, std::min(bottom, original_shape.height - 1));
-
-      int width  = right - left;
-      int height = bottom - top;
-
-      if (width > 0 && height > 0) {
-        boxes.emplace_back(cv::Rect(left, top, width, height));
-        confs.push_back(person_conf);
-      }
+    const float confidence = cpu_output_buffer_[4 * num_anchors_ + i];
+    if (confidence > conf_thresh_) {
+      const float cx = cpu_output_buffer_[i];
+      const float cy = cpu_output_buffer_[num_anchors_ + i];
+      const float w = cpu_output_buffer_[2 * num_anchors_ + i];
+      const float h = cpu_output_buffer_[3 * num_anchors_ + i];
+      const int left = static_cast<int>((cx - 0.5f * w) * scale_x);
+      const int top = static_cast<int>((cy - 0.5f * h) * scale_y);
+      const int width = static_cast<int>(w * scale_x);
+      const int height = static_cast<int>(h * scale_y);
+      boxes.emplace_back(left, top, width, height);
+      confidences.push_back(confidence);
     }
   }
 
   std::vector<int> indices;
-  if (!boxes.empty()) {
-    cv::dnn::NMSBoxes(boxes, confs, conf_thresh_, nms_thresh_, indices);
-  }
-
+  cv::dnn::NMSBoxes(boxes, confidences, conf_thresh_, nms_thresh_, indices);
   for (int idx : indices) {
     Detection det;
     det.class_id = 0;
-    det.confidence = confs[idx];
+    det.confidence = confidences[idx];
     det.box = boxes[idx];
     detections.push_back(det);
   }
-
   return detections;
 }
 #endif

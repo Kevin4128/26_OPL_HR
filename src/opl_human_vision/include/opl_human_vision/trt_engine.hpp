@@ -59,8 +59,8 @@ private:
   float conf_thresh_;
   float nms_thresh_;
   int device_id_{0};
-
 #ifdef HAVE_TENSORRT
+  bool loaded_{false};
   Logger logger_;
   std::unique_ptr<nvinfer1::IRuntime, TrtDeleter> runtime_{nullptr};
   std::unique_ptr<nvinfer1::ICudaEngine, TrtDeleter> engine_{nullptr};

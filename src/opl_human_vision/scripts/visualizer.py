@@ -6,7 +6,6 @@ from opl_interfaces.msg import TrackedHumanArray
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, qos_profile_sensor_data
 
 class PipelineVisualizer(Node):
     def __init__(self):
@@ -31,24 +30,18 @@ class PipelineVisualizer(Node):
         cv2.putText(self.rendered_frame, "Waiting for Camera...", (150, 240),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
 
-        image_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=5
-        )
-
         self.image_sub = self.create_subscription(
             Image,
             image_topic,
             self.image_callback,
-            image_qos
+            10
         )
 
         self.human_sub = self.create_subscription(
             TrackedHumanArray,
             recognized_topic,
             self.recognized_callback,
-            qos_profile_sensor_data
+            10
         )
 
         self.get_logger().info(f"Visualizer subscribed to '{image_topic}' & '{recognized_topic}'")
