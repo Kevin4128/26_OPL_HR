@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from collections import OrderedDict
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
@@ -16,7 +18,8 @@ def person_label(human):
     enrolled = named and 0 < human.track_id < 1000000000
     display_id = human.track_id if enrolled else raw_id
     raw_suffix = f" (raw:{raw_id})" if enrolled else ''
-    return f"ID:{display_id}{raw_suffix} | {human.name} ({human.confidence:.2f})"
+    prediction = " [predicted]" if not getattr(human, "observed", True) else ""
+    return f"ID:{display_id}{raw_suffix} | {human.name} ({human.confidence:.2f}){prediction}"
 
 class PipelineVisualizer(Node):
     def __init__(self):
@@ -32,7 +35,8 @@ class PipelineVisualizer(Node):
         recognized_topic = self.get_parameter('recognized_topic').get_parameter_value().string_value
 
         self.latest_image_msg = None
-        self.latest_humans = []
+        self.latest_human_msg = None
+        self.images = OrderedDict()
         self.first_frame_received = False
 
         # Create a dummy frame so the window pops up immediately
@@ -73,29 +77,44 @@ class PipelineVisualizer(Node):
         # Very cheap callback.
         # Keep only the newest ROS image message.
         self.latest_image_msg = msg
+        self.images[self.frame_key(msg)] = msg
+        while len(self.images) > 60:
+            self.images.popitem(last=False)
+
+    @staticmethod
+    def frame_key(msg):
+        return (msg.header.stamp.sec, msg.header.stamp.nanosec, msg.header.frame_id.lstrip('/'))
+
+    def matched_display(self):
+        humans = self.latest_human_msg
+        if humans is not None:
+            image = self.images.get(self.frame_key(humans))
+            age = (self.get_clock().now().nanoseconds -
+                   (humans.header.stamp.sec * 1000000000 + humans.header.stamp.nanosec)) * 1e-9
+            if image is not None and 0 <= age <= 1.0:
+                return image, humans.humans
+        return self.latest_image_msg, []
 
     def recognized_callback(self, human_msg):
-        self.latest_humans = human_msg.humans
+        self.latest_human_msg = human_msg
 
     def render_frame(self):
         if self.latest_image_msg is not None:
 
             # Consume the newest image.
-            msg = self.latest_image_msg
-            self.latest_image_msg = None
+            msg, humans = self.matched_display()
 
             try:
                 display_frame = self.bridge.imgmsg_to_cv2(
                     msg,
                     desired_encoding='bgr8'
-                )
+                ).copy()
             except Exception as e:
                 self.get_logger().error(
                     f"cv_bridge exception: {e}"
                 )
                 return
 
-            humans = self.latest_humans
 
             img_h, img_w = display_frame.shape[:2]
 
@@ -119,6 +138,8 @@ class PipelineVisualizer(Node):
                 else:
                     color = (0, 255, 0)
 
+                if not human.observed:
+                    color = (0, 165, 255)
                 cv2.rectangle(display_frame, (x, y), (x + w, y + h), color, 2)
 
                 landmarks = getattr(human, 'landmarks', [])
@@ -130,7 +151,7 @@ class PipelineVisualizer(Node):
                 # --- CONSTRUCT LABEL WITH DEPTH ---
                 label = person_label(human)
 
-                if self.show_depth and hasattr(human, 'position_3d'):
+                if self.show_depth and human.position_valid:
                     z_dist = human.position_3d.z
                     if z_dist > 0.0:
                         label += f" | {z_dist:.2f}m"

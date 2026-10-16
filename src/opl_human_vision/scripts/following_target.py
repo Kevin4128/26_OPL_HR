@@ -74,7 +74,7 @@ class FollowingTargetNode(Node):
         human = self.visible.get(self.selected)
         if self.selected and human is not None and self.fresh():
             p = human.position_3d
-            if all(math.isfinite(v) for v in (p.x, p.y, p.z)) and p.z > 0:
+            if human.position_valid and all(math.isfinite(v) for v in (p.x, p.y, p.z)) and p.z > 0:
                 out.position_3d = p
                 out.valid = True
                 out.state = FollowingTarget.TRACKING

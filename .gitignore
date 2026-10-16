@@ -7,3 +7,6 @@ laptop_models/
 build/
 install/
 log/
+
+# Explicitly enrolled biometric templates and local writer locks.
+.private/

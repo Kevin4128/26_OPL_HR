@@ -1,6 +1,7 @@
-uint64 raw_track_id   # Temporary track ID (or 0 to automatically pick closest person)
+uint64 raw_track_id   # Explicit fresh track; 0 snapshots a confidence-ordered automatic group
 string name           # Optional name (e.g., "Alice"). Defaults to "Person_X" if empty
 ---
 bool success
-string message
-uint64 persistent_id
+string message        # success acknowledges authorization, not completed biometric storage
+uint64 persistent_id  # Completion identity is reported on enrollment_status
+uint64 session_id

@@ -1,11 +1,11 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, GroupAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch_ros.actions import Node, ComposableNodeContainer
+from launch_ros.actions import Node, ComposableNodeContainer, SetParameter
 from launch_ros.descriptions import ComposableNode
 from launch_ros.substitutions import FindPackageShare
 from launch.substitutions import PathJoinSubstitution
@@ -16,7 +16,7 @@ def generate_launch_description():
 
     # Default model file paths
     default_detector_model = os.path.join(models_dir, 'yolov8n-pose.engine')
-    default_scrfd_model    = os.path.join(models_dir, 'scrfd_2.5g_2.engine')
+    default_scrfd_model    = os.path.join(models_dir, 'scrfd_2.5g.engine')
     default_adaface_model  = os.path.join(models_dir, 'adaface_ir50.engine')
     default_osnet_model    = os.path.join(models_dir, 'osnet_x1_0.engine')
 
@@ -41,7 +41,7 @@ def generate_launch_description():
     # 3. Human Tracker Node Parameters
     # -------------------------------------------------------------------------
     max_age_arg    = DeclareLaunchArgument('tracker_max_age', default_value='60', description='Max frames to persist a lost track internally')
-    max_publish_age_arg = DeclareLaunchArgument('tracker_max_publish_age', default_value='1', description='Max missed tracker updates before hiding an unmatched track')
+    max_publish_age_arg = DeclareLaunchArgument('tracker_max_publish_age', default_value='5', description='Max missed tracker updates before hiding an unmatched track')
     min_hits_arg   = DeclareLaunchArgument('tracker_min_hits', default_value='3', description='Min consecutive detections to confirm a track')
     iou_thresh_arg = DeclareLaunchArgument('tracker_iou_threshold', default_value='0.35', description='IoU association threshold for tracking')
 
@@ -51,6 +51,35 @@ def generate_launch_description():
     appearance_refresh_interval_arg    = DeclareLaunchArgument('appearance_refresh_interval', default_value='15', description='Eligible successful matches between appearance-gallery refreshes after initial seeding; higher reduces GPU work but adapts more slowly; overlapping crops skip refresh')
     appearance_spatial_base_ratio_arg  = DeclareLaunchArgument('appearance_spatial_base_ratio', default_value='0.10', description='Base recovery search radius around predicted box centre as a fraction of max(image width, height); higher allows larger position errors but more competing people')
     appearance_spatial_speed_ratio_arg = DeclareLaunchArgument('appearance_spatial_speed_ratio_per_sec', default_value='0.75', description='Recovery radius growth per elapsed second since last observation, as a fraction of max(image width, height); radius = base + speed * seconds, capped at 1.0; higher permits faster displacement')
+
+    perception_args = [
+        DeclareLaunchArgument('recovery_confidence_threshold', default_value='0.30', description='Weak proposals for existing confirmed tracks only; never new tracks'),
+        DeclareLaunchArgument('prediction_hold_sec', default_value='0.5'),
+        DeclareLaunchArgument('track_max_age_sec', default_value='2.0'),
+        DeclareLaunchArgument('appearance_recovery_sec', default_value='2.0'),
+        DeclareLaunchArgument('fixed_frame', default_value='odom', description='Fixed frame for timestamped human positions'),
+        DeclareLaunchArgument('observation_buffer_size', default_value='60'),
+        DeclareLaunchArgument('max_observation_age_sec', default_value='1.0'),
+        DeclareLaunchArgument('observation_wait_sec', default_value='0.1'),
+        DeclareLaunchArgument('depth_slop_sec', default_value='0.02'),
+        DeclareLaunchArgument('depth_timestamp_offset_sec', default_value='0.0', description='Known offset added to depth stamps to express RGB/ROS time'),
+        # Jazzy launch requires a non-empty typed sequence; an empty string matches no frame.
+        DeclareLaunchArgument('registered_frame_aliases', default_value="['']", description='Explicit frame IDs for depth/calibration known to use RGB optical coordinates'),
+        DeclareLaunchArgument('depth_registered_to_rgb', default_value='true'),
+        DeclareLaunchArgument('depth_min_valid_pixels', default_value='25'),
+        DeclareLaunchArgument('depth_min_valid_fraction', default_value='0.25'),
+        DeclareLaunchArgument('depth_min_m', default_value='0.2'),
+        DeclareLaunchArgument('depth_max_m', default_value='10.0'),
+        DeclareLaunchArgument('depth_max_spread_m', default_value='0.3'),
+        DeclareLaunchArgument('depth_max_spread_ratio', default_value='0.15'),
+    ]
+    timing_parameters = {name: LaunchConfiguration(name) for name in (
+        'observation_buffer_size', 'max_observation_age_sec', 'observation_wait_sec')}
+    spatial_parameters = {name: LaunchConfiguration(name) for name in (
+        'fixed_frame', 'depth_slop_sec', 'depth_timestamp_offset_sec',
+        'registered_frame_aliases', 'depth_registered_to_rgb', 'depth_min_valid_pixels',
+        'depth_min_valid_fraction', 'depth_min_m', 'depth_max_m',
+        'depth_max_spread_m', 'depth_max_spread_ratio')}
 
     # -------------------------------------------------------------------------
     # 4. Face & Person Recognizer Node Parameters (SCRFD, AdaFace, OSNet)
@@ -69,7 +98,7 @@ def generate_launch_description():
     confirm_dur_arg   = DeclareLaunchArgument('min_confirm_duration_sec', default_value='2.5', description='Min duration required to lock id')
 
     identity_lock_grace_arg = DeclareLaunchArgument('identity_lock_grace_sec', default_value='3.0', description='Seconds to retain raw-track to persistent-ID lock during temporary occlusion')
-    session_reid_timeout_arg = DeclareLaunchArgument('session_reid_timeout_sec', default_value='5.0', description='Seconds to retain anonymous ReID identities after disappearance')
+    session_reid_timeout_arg = DeclareLaunchArgument('session_reid_timeout_sec', default_value='2.0', description='Seconds to retain anonymous ReID identities after disappearance')
     spatial_gate_age_arg = DeclareLaunchArgument('reid_spatial_gate_max_age_sec', default_value='2.0', description='Maximum age of 3D position used for ReID gating')
     spatial_gate_base_arg = DeclareLaunchArgument('reid_spatial_gate_base_m', default_value='0.75', description='Base allowed 3D displacement during ReID')
     spatial_speed_arg = DeclareLaunchArgument('reid_spatial_gate_max_speed_mps', default_value='2.5', description='Maximum plausible person speed used by ReID spatial gating')
@@ -82,7 +111,15 @@ def generate_launch_description():
     detections_topic = 'raw_detections'
     tracked_topic    = 'tracked_humans'
     recognized_topic = 'recognized_humans'
-    depth_topic = PythonExpression(["'camera/depth/image_raw' if '", LaunchConfiguration('camera_type'), "' == 'gemini335' else 'camera/camera/aligned_depth_to_color/image_raw'"])
+    depth_topic_default = PythonExpression(["'camera/depth/image_raw' if '", LaunchConfiguration('camera_type'), "' == 'gemini335' else 'camera/camera/aligned_depth_to_color/image_raw'"])
+
+    camera_info_default = PythonExpression(["'camera/color/camera_info' if '", LaunchConfiguration('camera_type'), "' == 'gemini335' else 'camera/camera/color/camera_info'"])
+    perception_args.extend([
+        DeclareLaunchArgument('depth_topic', default_value=depth_topic_default),
+        DeclareLaunchArgument('camera_info_topic', default_value=camera_info_default),
+    ])
+    depth_topic = LaunchConfiguration('depth_topic')
+    camera_info_topic = LaunchConfiguration('camera_info_topic')
 
     # RealSense Camera Profile Expression ("640x480x30")
     rs_profile = PythonExpression([
@@ -104,6 +141,7 @@ def generate_launch_description():
                     'detections_topic': detections_topic,
                     'model_path': LaunchConfiguration('detector_model_path'),
                     'confidence_threshold': LaunchConfiguration('detector_confidence_threshold'),
+                    'recovery_confidence_threshold': LaunchConfiguration('recovery_confidence_threshold'),
                     'nms_threshold': LaunchConfiguration('detector_nms_threshold')
                 }],
                 extra_arguments=[{'use_intra_process_comms': True}]
@@ -114,7 +152,14 @@ def generate_launch_description():
                 name='human_tracker_node',
                 parameters=[{
                     'image_topic': image_topic,
+                    **timing_parameters,
+                    **spatial_parameters,
+                    'track_max_age_sec': LaunchConfiguration('track_max_age_sec'),
+                    'prediction_hold_sec': LaunchConfiguration('prediction_hold_sec'),
+                    'high_confidence_threshold': LaunchConfiguration('detector_confidence_threshold'),
+                    'appearance_recovery_sec': LaunchConfiguration('appearance_recovery_sec'),
                     'depth_topic': depth_topic,
+                    'camera_info_topic': camera_info_topic,
                     'detections_topic': detections_topic,
                     'tracked_topic': tracked_topic,
                     'max_age': LaunchConfiguration('tracker_max_age'),
@@ -138,6 +183,7 @@ def generate_launch_description():
                 parameters=[{
                     'image_topic': image_topic,
                     'tracked_topic': tracked_topic,
+                    **timing_parameters,
                     'recognized_topic': recognized_topic,
                     'scrfd_model_path': LaunchConfiguration('scrfd_model_path'),
                     'adaface_model_path': LaunchConfiguration('adaface_model_path'),
@@ -146,6 +192,7 @@ def generate_launch_description():
                     'scrfd_nms_threshold': LaunchConfiguration('scrfd_nms_threshold'),
                     'match_threshold': LaunchConfiguration('face_match_threshold'),
                     'body_match_threshold': LaunchConfiguration('body_match_threshold'),
+                    'minimum_learning_confidence': LaunchConfiguration('detector_confidence_threshold'),
                     'min_confirm_frames': LaunchConfiguration('min_confirm_frames'),
                     'min_confirm_duration_sec': LaunchConfiguration('min_confirm_duration_sec'),
                     'identity_lock_grace_sec': LaunchConfiguration('identity_lock_grace_sec'),
@@ -188,6 +235,13 @@ def generate_launch_description():
         }.items()
     )
 
+    # JPEG cannot encode 16UC1 depth. Scope lossless PNG overrides to this driver only.
+    realsense_node = GroupAction(actions=[
+        SetParameter(name='.camera.aligned_depth_to_color.image_raw.compressed.format', value='png'),
+        SetParameter(name='.camera.depth.image_rect_raw.compressed.format', value='png'),
+        realsense_node,
+    ])
+
     gemini_node = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([FindPackageShare('opl_gemini335'), 'launch', 'gemini335.launch.py'])),
         condition=IfCondition(PythonExpression(["'", LaunchConfiguration('camera_type'), "' == 'gemini335'"])),
@@ -222,7 +276,7 @@ def generate_launch_description():
         # Detector Arguments
         detector_model_arg, detector_conf_arg, detector_nms_arg,
         # Tracker Arguments
-        max_age_arg, max_publish_age_arg, min_hits_arg, iou_thresh_arg,
+        max_age_arg, max_publish_age_arg, min_hits_arg, iou_thresh_arg, *perception_args,
         appearance_reid_enabled_arg, appearance_match_threshold_arg,
         appearance_reid_max_age_arg, appearance_refresh_interval_arg,
         appearance_spatial_base_ratio_arg, appearance_spatial_speed_ratio_arg,

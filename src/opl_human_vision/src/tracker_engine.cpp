@@ -1,4 +1,5 @@
 #include "opl_human_vision/tracker_engine.hpp"
+#include "opl_human_vision/observation_buffer.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -349,7 +350,9 @@ TrackerEngine::TrackerEngine(
   int appearance_reid_max_age,
   int appearance_refresh_interval,
   float appearance_spatial_base_ratio,
-  float appearance_spatial_speed_ratio_per_sec)
+  float appearance_spatial_speed_ratio_per_sec,
+  double max_age_sec, double recovery_age_sec,
+  float high_confidence_threshold, double prediction_hold_sec)
 : max_age_(max_age),
   min_hits_(min_hits),
   iou_threshold_(iou_threshold),
@@ -362,6 +365,16 @@ TrackerEngine::TrackerEngine(
   appearance_spatial_speed_ratio_per_sec_(
     appearance_spatial_speed_ratio_per_sec)
 {
+  if (!std::isfinite(max_age_sec) || max_age_sec <= 0 || !std::isfinite(recovery_age_sec) || recovery_age_sec <= 0)
+    throw std::invalid_argument("Invalid tracker timeouts");
+  max_age_sec_ = max_age_sec; recovery_age_sec_ = std::min(max_age_sec, recovery_age_sec);
+  if (!std::isfinite(high_confidence_threshold) || high_confidence_threshold <= 0 || high_confidence_threshold > 1 ||
+      !std::isfinite(prediction_hold_sec) || prediction_hold_sec < 0 || prediction_hold_sec > max_age_sec)
+    throw std::invalid_argument("Invalid confidence/prediction settings");
+  high_confidence_threshold_ = high_confidence_threshold;
+  prediction_hold_sec_ = prediction_hold_sec;
+  max_prediction_dt_sec_ = max_age_sec_;
+
   appearance_match_threshold_ =
     std::max(
       -1.0f,
@@ -669,11 +682,16 @@ cv::Mat TrackerEngine::estimateCameraMotion(
     if (
       valid_prev.size() >= 6)
     {
-      cv::Mat small_transform =
-        cv::estimateAffinePartial2D(
-          valid_prev,
-          valid_curr
-        );
+      cv::Mat inliers;
+      cv::Mat small_transform = cv::estimateAffinePartial2D(valid_prev, valid_curr, inliers);
+      if (!small_transform.empty()) {
+        const double scale_fit = std::hypot(small_transform.at<double>(0,0), small_transform.at<double>(1,0));
+        const double rotation = std::atan2(small_transform.at<double>(1,0), small_transform.at<double>(0,0));
+        if (cv::countNonZero(inliers) < 6 || cv::countNonZero(inliers) < 0.5 * valid_prev.size() ||
+          scale_fit < 0.8 || scale_fit > 1.25 || std::abs(rotation) > CV_PI / 6 ||
+          std::hypot(small_transform.at<double>(0,2), small_transform.at<double>(1,2)) > 0.5 * std::max(small_gray.cols, small_gray.rows))
+          small_transform.release();
+      }
 
 
       if (
@@ -785,6 +803,12 @@ std::vector<float> TrackerEngine::extractAppearance(
   const cv::Mat& frame,
   const cv::Rect2f& bbox)
 {
+  if (supplied_features_) {
+    for (size_t i = 0; i < supplied_boxes_.size(); ++i)
+      if (supplied_boxes_[i] == bbox) return (*supplied_features_)[i];
+    return {};
+  }
+
   if (
     !appearanceReidReady() ||
     frame.empty())
@@ -1042,6 +1066,8 @@ void TrackerEngine::addAppearanceTemplate(
       appearance.body_gallery
     );
 
+
+  if (similarity < appearance_match_threshold_) return;  // Never learn an incompatible crop as diversity.
 
   if (
     similarity >=
@@ -1443,6 +1469,7 @@ void TrackerEngine::applyDetectionToTrack(
   }
 
 
+  const float alpha = 1.0f - std::pow(1.0f - velocity_smoothing_, observation_dt / nominal_dt_sec_);
   if (
     !track.velocity_initialized)
   {
@@ -1455,29 +1482,37 @@ void TrackerEngine::applyDetectionToTrack(
   } else {
 
     track.velocity.x =
-      velocity_smoothing_ *
+      alpha *
         measured_velocity.x +
       (
         1.0f -
-        velocity_smoothing_
+        alpha
       ) *
         track.velocity.x;
 
 
     track.velocity.y =
-      velocity_smoothing_ *
+      alpha *
         measured_velocity.y +
       (
         1.0f -
-        velocity_smoothing_
+        alpha
       ) *
         track.velocity.y;
   }
 
 
-  // Real detector observation becomes authoritative.
-  track.bbox =
-    det_box;
+  track.observation = detection;
+  if (detection.fixed_position_valid) {track.last_fixed_position = detection.fixed_position; track.has_fixed_position = true;}
+  // Correct the motion prediction instead of snapping to every noisy box.
+  const float position_gain = 1.f - std::exp(-float(observation_dt)/.06f);
+  const float size_gain = 1.f - std::exp(-float(observation_dt)/.12f);
+  const cv::Point2f predicted_center(track.bbox.x+track.bbox.width*.5f, track.bbox.y+track.bbox.height*.5f);
+  const auto center = predicted_center + position_gain*(det_center-predicted_center);
+  track.bbox.width += size_gain*(det_box.width-track.bbox.width);
+  track.bbox.height += size_gain*(det_box.height-track.bbox.height);
+  track.bbox.x = center.x-track.bbox.width*.5f;
+  track.bbox.y = center.y-track.bbox.height*.5f;
 
   track.last_observed_center =
     det_center;
@@ -1557,6 +1592,24 @@ void TrackerEngine::applyDetectionToTrack(
 }
 
 
+void TrackerEngine::reset() {
+  active_tracks_.clear(); appearance_states_.clear(); prev_frame_gray_.release();
+  last_update_sec_ = 0; supplied_features_ = nullptr; supplied_boxes_.clear();
+}
+
+bool TrackerEngine::spatialMatch(const Track& track, const opl_interfaces::msg::TrackedHuman& detection) const {
+  if (!track.has_fixed_position || !detection.fixed_position_valid) return true;
+  const auto& a = track.last_fixed_position; const auto& b = detection.fixed_position;
+  if (opticalFrame(a.header.frame_id).empty() || opticalFrame(a.header.frame_id) != opticalFrame(b.header.frame_id)) return true;
+  if (stampNs(a.header.stamp) <= 0 || stampNs(b.header.stamp) <= 0) return true;
+  const double dt = (stampNs(b.header.stamp) - stampNs(a.header.stamp)) * 1e-9;
+  if (dt < 0) return false;
+  if (dt > recovery_age_sec_) return true;
+  if (!std::isfinite(a.point.x) || !std::isfinite(a.point.y) || !std::isfinite(a.point.z) ||
+    !std::isfinite(b.point.x) || !std::isfinite(b.point.y) || !std::isfinite(b.point.z)) return true;
+  return std::hypot(std::hypot(a.point.x-b.point.x,a.point.y-b.point.y),a.point.z-b.point.z) <= 0.75 + 2.5 * dt;
+}
+
 // -----------------------------------------------------------------------------
 // Main tracker update.
 // -----------------------------------------------------------------------------
@@ -1565,7 +1618,8 @@ std::vector<Track> TrackerEngine::update(
   const std::vector<
     opl_interfaces::msg::TrackedHuman>& detections,
   const cv::Mat& frame,
-  double timestamp_sec)
+  double timestamp_sec,
+  const std::vector<std::vector<float>>& recorded_features)
 {
   const bool timestamp_valid =
     std::isfinite(
@@ -1573,6 +1627,23 @@ std::vector<Track> TrackerEngine::update(
     ) &&
     timestamp_sec > 0.0;
 
+
+  if (timestamp_valid && last_update_sec_ > 0 && timestamp_sec == last_update_sec_) return {};
+  const double update_dt = timestamp_valid && last_update_sec_ > 0 ? std::max(0.0, timestamp_sec - last_update_sec_) : nominal_dt_sec_;
+  if (timestamp_valid && last_update_sec_ > 0 && timestamp_sec < last_update_sec_) reset();
+  if (timestamp_valid && last_update_sec_ > 0 && timestamp_sec - last_update_sec_ > max_age_sec_)
+    prev_frame_gray_.release();
+  if (timestamp_valid) {
+    for (auto it = active_tracks_.begin(); it != active_tracks_.end();) {
+      if (timestamp_sec - it->last_observation_time_sec > max_age_sec_) {
+        appearance_states_.erase(it->id); it = active_tracks_.erase(it);
+      } else ++it;
+    }
+    last_update_sec_ = timestamp_sec;
+  }
+  supplied_features_ = !detections.empty() && recorded_features.size() == detections.size() ? &recorded_features : nullptr;
+  supplied_boxes_.clear();
+  for (const auto & detection : detections) supplied_boxes_.push_back(detectionBox(detection));
 
   // ===========================================================================
   // Step 1:
@@ -1725,6 +1796,18 @@ std::vector<Track> TrackerEngine::update(
       );
 
 
+    if (valid_motion) {
+      const auto p1 = transformPoint(track.bbox.tl());
+      const auto p2 = transformPoint({track.bbox.x + track.bbox.width, track.bbox.y});
+      const auto p3 = transformPoint(track.bbox.br());
+      const auto p4 = transformPoint({track.bbox.x, track.bbox.y + track.bbox.height});
+      track.bbox.width = std::max({p1.x,p2.x,p3.x,p4.x}) - std::min({p1.x,p2.x,p3.x,p4.x});
+      track.bbox.height = std::max({p1.y,p2.y,p3.y,p4.y}) - std::min({p1.y,p2.y,p3.y,p4.y});
+      const cv::Point2f velocity = track.velocity;
+      track.velocity = {float(motion.at<double>(0,0)*velocity.x + motion.at<double>(0,1)*velocity.y),
+        float(motion.at<double>(1,0)*velocity.x + motion.at<double>(1,1)*velocity.y)};
+    }
+
     // Keep the last real observation in the current camera coordinate system.
     track.last_observed_center =
       transformPoint(
@@ -1842,7 +1925,8 @@ std::vector<Track> TrackerEngine::update(
 
       if (
         iou >=
-        iou_threshold_)
+        iou_threshold_ && detections[j].confidence >= high_confidence_threshold_ &&
+        spatialMatch(active_tracks_[i], detections[j]))
       {
         primary_cost_matrix[i][j] =
           1.0f -
@@ -1851,6 +1935,41 @@ std::vector<Track> TrackerEngine::update(
     }
   }
 
+
+  std::vector<bool> deferred_birth(detection_count, false);
+  const auto geometric_costs = primary_cost_matrix;
+  // Appearance can veto ambiguous primary matches before they consume a detection.
+  std::vector<std::vector<float>> queries(detection_count);
+  std::vector<bool> queried(detection_count, false);
+  auto query = [&](size_t j) -> const std::vector<float>& {
+    if (!queried[j]) {queries[j] = extractAppearance(frame, detectionBox(detections[j])); queried[j] = true;}
+    return queries[j];
+  };
+  for (size_t i = 0; i < track_count; ++i) for (size_t j = 0; j < detection_count; ++j) {
+    if (primary_cost_matrix[i][j] >= INVALID_ASSOCIATION_COST * 0.5f) continue;
+    bool ambiguous = false;
+    for (size_t k = 0; k < detection_count; ++k)
+      if (k != j && geometric_costs[i][k] < INVALID_ASSOCIATION_COST * 0.5f && iou_matrix[i][k] >= iou_threshold_ && std::abs(iou_matrix[i][k] - iou_matrix[i][j]) < 0.15f) ambiguous = true;
+    for (size_t k = 0; k < track_count; ++k)
+      if (k != i && geometric_costs[k][j] < INVALID_ASSOCIATION_COST * 0.5f && iou_matrix[k][j] >= iou_threshold_ && std::abs(iou_matrix[k][j] - iou_matrix[i][j]) < 0.15f) ambiguous = true;
+    if (!ambiguous) continue;
+    auto state = appearance_states_.find(active_tracks_[i].id);
+    bool supported = false;
+    if (appearanceReidReady() && state != appearance_states_.end() && !query(j).empty()) {
+      const float score = getMaxAppearanceSimilarity(query(j), state->second.body_gallery);
+      float rival = -1;
+      for (size_t k = 0; k < track_count; ++k) if (k != i && spatialMatch(active_tracks_[k], detections[j])) {
+        auto other = appearance_states_.find(active_tracks_[k].id);
+        if (other != appearance_states_.end()) rival = std::max(rival, getMaxAppearanceSimilarity(query(j), other->second.body_gallery));
+      }
+      supported = score >= appearance_match_threshold_ && score - rival >= 0.05f;
+      if (supported) primary_cost_matrix[i][j] = 0.5f * primary_cost_matrix[i][j] + 0.5f * (1 - score);
+    }
+    if (!supported) {
+      primary_cost_matrix[i][j] = INVALID_ASSOCIATION_COST;
+      deferred_birth[j] = true;
+    }
+  }
 
   const std::vector<int>
     primary_assignment =
@@ -2052,9 +2171,8 @@ std::vector<Track> TrackerEngine::update(
       }
 
 
-      if (
-        track.time_since_update >
-        appearance_reid_max_age_)
+      if (timestamp_valid ? timestamp_sec - track.last_observation_time_sec > recovery_age_sec_ :
+        track.time_since_update > appearance_reid_max_age_)
       {
         continue;
       }
@@ -2091,7 +2209,7 @@ std::vector<Track> TrackerEngine::update(
       j < detection_count;
       ++j)
     {
-      if (!det_matched[j]) {
+      if (!det_matched[j] && detections[j].confidence >= high_confidence_threshold_) {
 
         unmatched_detection_indices.push_back(
           j
@@ -2229,7 +2347,7 @@ std::vector<Track> TrackerEngine::update(
 
           // Geometry is a gate, not the appearance score itself.
           if (
-            !passesAppearanceSpatialGate(
+            !spatialMatch(track, detections[global_det_idx]) || !passesAppearanceSpatialGate(
               track,
               det_box,
               frame,
@@ -2271,6 +2389,18 @@ std::vector<Track> TrackerEngine::update(
         }
       }
 
+
+      for (size_t i = 0; i < appearance_cost_matrix.size(); ++i)
+        for (size_t j = 0; j < unmatched_detection_indices.size(); ++j) {
+          const float score = appearance_similarity_matrix[i][j];
+          float rival = -1;
+          for (size_t k = 0; k < appearance_cost_matrix.size(); ++k) if (k != i) rival = std::max(rival, appearance_similarity_matrix[k][j]);
+          for (size_t k = 0; k < unmatched_detection_indices.size(); ++k) if (k != j) rival = std::max(rival, appearance_similarity_matrix[i][k]);
+          if (score - rival < 0.05f) {
+            appearance_cost_matrix[i][j] = INVALID_ASSOCIATION_COST;
+            if (score >= appearance_match_threshold_) deferred_birth[unmatched_detection_indices[j]] = true;
+          }
+        }
 
       const std::vector<int>
         appearance_assignment =
@@ -2410,6 +2540,41 @@ std::vector<Track> TrackerEngine::update(
   }
 
 
+  // Weak proposals may only recover established tracks after strong association.
+  std::vector<std::vector<float>> weak_costs(track_count,
+    std::vector<float>(detection_count, INVALID_ASSOCIATION_COST));
+  for (size_t i=0;i<track_count;++i) {
+    if (track_matched[i] || active_tracks_[i].state == TrackState::Tentative) continue;
+    for (size_t j=0;j<detection_count;++j) {
+      if (det_matched[j] || !std::isfinite(detections[j].confidence) || detections[j].confidence <= 0 ||
+          detections[j].confidence >= high_confidence_threshold_ ||
+          !spatialMatch(active_tracks_[i],detections[j])) continue;
+      const float iou=iou_matrix[i][j];
+      if (iou < .15f) continue;
+      auto appearance=appearance_states_.find(active_tracks_[i].id);
+      if (appearanceReidReady() && appearance != appearance_states_.end() && !appearance->second.body_gallery.empty()) {
+        if (getMaxAppearanceSimilarity(query(j),appearance->second.body_gallery) < appearance_match_threshold_) continue;
+      } else if (iou < std::max(.5f,iou_threshold_)) continue;
+      weak_costs[i][j]=1.f-iou;
+    }
+  }
+  const auto weak_geometry=weak_costs;
+  for (size_t i=0;i<track_count;++i) for(size_t j=0;j<detection_count;++j) {
+    if (weak_geometry[i][j] >= INVALID_ASSOCIATION_COST*.5f) continue;
+    float rival=INVALID_ASSOCIATION_COST;
+    for(size_t k=0;k<track_count;++k) if(k!=i) rival=std::min(rival,weak_geometry[k][j]);
+    for(size_t k=0;k<detection_count;++k) if(k!=j) rival=std::min(rival,weak_geometry[i][k]);
+    if(rival-weak_geometry[i][j] < .05f) weak_costs[i][j]=INVALID_ASSOCIATION_COST;
+  }
+  const auto weak_assignment=solveHungarian(weak_costs);
+  for(size_t i=0;i<track_count && i<weak_assignment.size();++i) {
+    const int j=weak_assignment[i];
+    if(j<0 || size_t(j)>=detection_count || weak_costs[i][j]>=INVALID_ASSOCIATION_COST*.5f ||
+       track_matched[i] || det_matched[j]) continue;
+    applyDetectionToTrack(active_tracks_[i],detections[j],frame,timestamp_sec,false);
+    track_matched[i]=true;det_matched[j]=true;
+  }
+
   // ===========================================================================
   // Step 6:
   // Tracks unmatched by BOTH association stages become genuinely missed.
@@ -2444,15 +2609,14 @@ std::vector<Track> TrackerEngine::update(
     }
 
 
-    if (
-      track.time_since_update >
-      velocity_decay_after_)
+    if (timestamp_valid ? timestamp_sec - track.last_observation_time_sec > nominal_dt_sec_ * velocity_decay_after_ :
+      track.time_since_update > velocity_decay_after_)
     {
       track.velocity.x *=
-        velocity_decay_;
+        std::pow(velocity_decay_, update_dt / nominal_dt_sec_);
 
       track.velocity.y *=
-        velocity_decay_;
+        std::pow(velocity_decay_, update_dt / nominal_dt_sec_);
     }
   }
 
@@ -2467,7 +2631,8 @@ std::vector<Track> TrackerEngine::update(
     j < detection_count;
     ++j)
   {
-    if (det_matched[j]) {
+    if (det_matched[j] || deferred_birth[j] || !std::isfinite(detections[j].confidence) ||
+        detections[j].confidence < high_confidence_threshold_) {
       continue;
     }
 
@@ -2553,8 +2718,13 @@ std::vector<Track> TrackerEngine::update(
     }
 
 
-    // If min_hits == 1, seed appearance immediately.
-    if (
+    new_track.observation = detections[j];
+    if (detections[j].fixed_position_valid) {new_track.last_fixed_position = detections[j].fixed_position; new_track.has_fixed_position = true;}
+    bool isolated_seed = true;
+    for (size_t k = 0; k < detection_count; ++k)
+      if (k != j && computeIoU(new_track.bbox, detectionBox(detections[k])) > 0.25f) isolated_seed = false;
+    // Seed only an isolated person crop.
+    if (isolated_seed &&
       new_track.state ==
       TrackState::Confirmed)
     {
@@ -2590,8 +2760,7 @@ std::vector<Track> TrackerEngine::update(
     active_tracks_.end())
   {
     if (
-      it->time_since_update >
-      max_age_)
+      !timestamp_valid && it->time_since_update > max_age_)
     {
       // Appearance state has exactly the same lifetime as its raw track.
       appearance_states_.erase(
@@ -2618,8 +2787,9 @@ std::vector<Track> TrackerEngine::update(
 
     if (
       publishable_state &&
-      it->time_since_update <=
-        max_publish_age_)
+      (it->time_since_update == 0 || (max_publish_age_ > 0 &&
+        (timestamp_valid ? timestamp_sec-it->last_observation_time_sec <= prediction_hold_sec_ :
+         it->time_since_update <= max_publish_age_))))
     {
       confirmed_tracks.push_back(
         *it
@@ -2631,6 +2801,7 @@ std::vector<Track> TrackerEngine::update(
   }
 
 
+  supplied_features_ = nullptr;
   return confirmed_tracks;
 }
 

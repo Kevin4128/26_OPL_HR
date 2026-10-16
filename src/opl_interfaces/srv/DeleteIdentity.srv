@@ -1,0 +1,4 @@
+uint64 persistent_id
+---
+bool success
+string message

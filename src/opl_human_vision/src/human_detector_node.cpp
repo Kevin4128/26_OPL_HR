@@ -1,8 +1,10 @@
 #include "opl_human_vision/human_detector_node.hpp"
 #include "opl_human_vision/pose_nms.hpp"
 #include "opl_human_vision/scoped_timing.hpp"
+#include "opl_human_vision/observation_buffer.hpp"
 #include "rclcpp_components/register_node_macro.hpp"
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <cstring>
 
@@ -15,6 +17,7 @@ HumanDetectorNode::HumanDetectorNode(const rclcpp::NodeOptions & options)
   declare_parameter<std::string>("detections_topic", "raw_detections");
   declare_parameter<std::string>("model_path", "");
   declare_parameter<float>("confidence_threshold", 0.45f);
+  declare_parameter<float>("recovery_confidence_threshold", 0.30f);
   declare_parameter<float>("nms_threshold", 0.50f);
   declare_parameter<int>("target_class_id", 0);
   declare_parameter<int>("device_id", 0);
@@ -139,6 +142,12 @@ HumanDetectorNode::on_configure(const rclcpp_lifecycle::State &) {
   detections_topic_ = get_parameter("detections_topic").as_string();
   model_path_ = get_parameter("model_path").as_string();
   conf_thresh_ = static_cast<float>(get_parameter("confidence_threshold").as_double());
+  recovery_conf_thresh_ = static_cast<float>(get_parameter("recovery_confidence_threshold").as_double());
+  if (!std::isfinite(conf_thresh_) || conf_thresh_ <= 0 || conf_thresh_ > 1 ||
+      !std::isfinite(recovery_conf_thresh_) || recovery_conf_thresh_ <= 0 || recovery_conf_thresh_ > conf_thresh_) {
+    RCLCPP_ERROR(get_logger(), "Require 0 < recovery confidence <= new-track confidence <= 1");
+    return CallbackReturn::FAILURE;
+  }
   nms_thresh_ = static_cast<float>(get_parameter("nms_threshold").as_double());
   target_class_id_ = get_parameter("target_class_id").as_int();
   device_id_ = get_parameter("device_id").as_int();
@@ -206,6 +215,11 @@ void HumanDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
     return;
   }
 
+  if (stampNs(msg->header.stamp) <= 0 || opticalFrame(msg->header.frame_id).empty()) {
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "Rejected RGB without valid acquisition stamp/frame");
+    return;
+  }
+
   try {
     ScopedTiming timing("YOLO.callback_total");
     cv_bridge::CvImageConstPtr cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8);
@@ -263,7 +277,7 @@ void HumanDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
 
     for (int i = 0; i < num_anchors_; ++i) {
       float conf = cpu_output_buffer_[4 * num_anchors_ + i];
-      if (conf < conf_thresh_) continue;
+      if (!std::isfinite(conf) || conf < recovery_conf_thresh_) continue;
 
       float cx = cpu_output_buffer_[0 * num_anchors_ + i];
       float cy = cpu_output_buffer_[1 * num_anchors_ + i];
@@ -297,35 +311,7 @@ void HumanDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
     for (int idx : indices) {
       const auto& kps = keypoints_list[idx];
 
-      float min_x = static_cast<float>(img_w), min_y = static_cast<float>(img_h);
-      float max_x = 0.0f, max_y = 0.0f;
-      int valid_kps = 0;
-
-      for (const auto& kp : kps) {
-        if (kp.z > 0.35f) {
-          min_x = std::min(min_x, kp.x);
-          min_y = std::min(min_y, kp.y);
-          max_x = std::max(max_x, kp.x);
-          max_y = std::max(max_y, kp.y);
-          valid_kps++;
-        }
-      }
-
-      cv::Rect final_box = bboxes[idx];
-
-      if (valid_kps >= 4) {
-        float kp_w = max_x - min_x;
-        float kp_h = max_y - min_y;
-
-        int tx1 = static_cast<int>(min_x - kp_w * 0.06f);
-        int ty1 = static_cast<int>(min_y - kp_h * 0.08f);
-        int tx2 = static_cast<int>(max_x + kp_w * 0.06f);
-        int ty2 = static_cast<int>(max_y + kp_h * 0.06f);
-
-        if (tx2 > tx1 && ty2 > ty1) {
-          final_box = cv::Rect(tx1, ty1, tx2 - tx1, ty2 - ty1);
-        }
-      }
+      const cv::Rect final_box = refinePersonBox(bboxes[idx], kps);
 
       // 6. Clamp to image boundary
       int x1 = std::max(0, std::min(final_box.x, img_w - 1));
@@ -340,6 +326,7 @@ void HumanDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
 
       opl_interfaces::msg::TrackedHuman human_msg;
       human_msg.confidence = confidences[idx];
+      human_msg.observed = true;
       human_msg.bbox.x_offset = x1;
       human_msg.bbox.y_offset = y1;
       human_msg.bbox.width = clamped_w;

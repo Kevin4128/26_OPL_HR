@@ -28,6 +28,9 @@ find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(opl_interfaces REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 
 # Search TensorRT & CUDA paths
 set(TRT_SEARCH_PATHS
@@ -85,18 +88,21 @@ add_library(human_tracker_node SHARED
   src/osnet_extractor.cpp
 )
 target_link_libraries(human_tracker_node ${TRT_LIBRARIES} ${OpenCV_LIBS})
-ament_target_dependencies(human_tracker_node rclcpp rclcpp_components rclcpp_lifecycle sensor_msgs cv_bridge opl_interfaces)
+ament_target_dependencies(human_tracker_node std_msgs rclcpp rclcpp_components rclcpp_lifecycle sensor_msgs cv_bridge opl_interfaces tf2_ros tf2_geometry_msgs)
 rclcpp_components_register_node(human_tracker_node PLUGIN "opl_human_vision::HumanTrackerNode" EXECUTABLE human_tracker_node_exe)
 
 # 3. Face & Re-ID Recognizer Component Library (Modularized)
 add_library(face_recognizer_node SHARED
   src/face_recognizer_node.cpp
   src/face_engine.cpp
+  src/identity_store.cpp
   src/scrfd_detector.cpp
   src/adaface_extractor.cpp
   src/osnet_extractor.cpp
 )
-target_link_libraries(face_recognizer_node ${TRT_LIBRARIES} ${OpenCV_LIBS})
+target_link_libraries(face_recognizer_node ${TRT_LIBRARIES} ${OpenCV_LIBS} OpenSSL::Crypto)
+get_filename_component(OPL_WORKSPACE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+target_compile_definitions(face_recognizer_node PRIVATE OPL_IDENTITY_STORE_DEFAULT="${OPL_WORKSPACE_DIR}/.private/identities")
 ament_target_dependencies(face_recognizer_node rclcpp rclcpp_components rclcpp_lifecycle sensor_msgs cv_bridge opl_interfaces)
 rclcpp_components_register_node(face_recognizer_node PLUGIN "opl_human_vision::FaceRecognizerNode" EXECUTABLE face_recognizer_node_exe)
 
@@ -137,6 +143,36 @@ ament_export_libraries(human_detector_node human_tracker_node face_recognizer_no
 
 if(BUILD_TESTING)
   enable_testing()
+  add_test(NAME visualizer_label COMMAND /usr/bin/python3 -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/test -p test_visualizer_label.py)
+  add_executable(test_identity_regressions test/test_identity_regressions.cpp)
+  target_link_libraries(test_identity_regressions face_recognizer_node ${OpenCV_LIBS})
+  ament_target_dependencies(test_identity_regressions opl_interfaces)
+  target_compile_options(test_identity_regressions PRIVATE -UNDEBUG)
+  foreach(scenario namespace geometry names)
+    add_test(NAME identity_${scenario}_regression COMMAND test_identity_regressions ${scenario})
+  endforeach()
+  add_library(test_directory_sync_failure SHARED test/test_directory_sync_failure.cpp)
+  target_link_libraries(test_directory_sync_failure ${CMAKE_DL_LIBS})
+  add_executable(test_identity_commit_failure test/test_identity_commit_failure.cpp)
+  target_link_libraries(test_identity_commit_failure face_recognizer_node ${OpenCV_LIBS})
+  target_compile_options(test_identity_commit_failure PRIVATE -UNDEBUG)
+  add_test(NAME identity_commit_failure COMMAND ${CMAKE_COMMAND} -E env
+    LD_PRELOAD=$<TARGET_FILE:test_directory_sync_failure> OPL_TEST_FAIL_DIRECTORY_FSYNC=1
+    $<TARGET_FILE:test_identity_commit_failure>)
+  add_executable(test_identity_policy test/test_identity_policy.cpp)
+  target_link_libraries(test_identity_policy face_recognizer_node ${OpenCV_LIBS})
+  ament_target_dependencies(test_identity_policy opl_interfaces)
+  target_compile_options(test_identity_policy PRIVATE -UNDEBUG)
+  add_test(NAME identity_policy COMMAND test_identity_policy)
+  add_executable(test_tracking_sequences test/test_tracking_sequences.cpp)
+  target_link_libraries(test_tracking_sequences human_tracker_node ${OpenCV_LIBS})
+  ament_target_dependencies(test_tracking_sequences opl_interfaces)
+  target_compile_options(test_tracking_sequences PRIVATE -UNDEBUG)
+  add_test(NAME tracking_sequences COMMAND test_tracking_sequences)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_test(NAME camera_configuration COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test/test_camera_configuration.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/launch/test_detector.launch.py)
   add_executable(test_pose_nms test/test_pose_nms.cpp)
   target_link_libraries(test_pose_nms ${OpenCV_LIBS})
   target_compile_options(test_pose_nms PRIVATE -UNDEBUG)
@@ -146,6 +182,17 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_tracker_occlusion opl_interfaces)
   target_compile_options(test_tracker_occlusion PRIVATE -UNDEBUG)
   add_test(NAME tracker_occlusion COMMAND test_tracker_occlusion)
+  add_executable(test_rgbd_observation test/test_rgbd_observation.cpp)
+  target_link_libraries(test_rgbd_observation human_tracker_node ${TRT_LIBRARIES} ${OpenCV_LIBS})
+  ament_target_dependencies(test_rgbd_observation opl_interfaces cv_bridge tf2_ros tf2_geometry_msgs)
+  target_compile_options(test_rgbd_observation PRIVATE -UNDEBUG)
+  add_test(NAME rgbd_observation COMMAND test_rgbd_observation)
+  add_executable(test_rgbd_tracker_node test/test_rgbd_tracker_node.cpp)
+  target_link_libraries(test_rgbd_tracker_node human_tracker_node ${TRT_LIBRARIES} ${OpenCV_LIBS})
+  ament_target_dependencies(test_rgbd_tracker_node rclcpp rclcpp_lifecycle opl_interfaces tf2_ros tf2_geometry_msgs)
+  target_compile_options(test_rgbd_tracker_node PRIVATE -UNDEBUG)
+  add_test(NAME rgbd_tracker_node COMMAND test_rgbd_tracker_node)
+  set_tests_properties(rgbd_tracker_node PROPERTIES TIMEOUT 15)
 endif()
 
 ament_package()

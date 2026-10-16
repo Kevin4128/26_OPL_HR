@@ -72,6 +72,7 @@ private:
   std::string model_path_;
 
   float conf_thresh_{0.45f};
+  float recovery_conf_thresh_{0.30f};
   float nms_thresh_{0.50f};
   int target_class_id_{0};
   int device_id_{0};

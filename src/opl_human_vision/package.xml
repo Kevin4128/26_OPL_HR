@@ -18,7 +18,13 @@
   <depend>cv_bridge</depend>
   <depend>image_transport</depend>
   <depend>opl_interfaces</depend>
+  <depend>openssl</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
   <exec_depend>opl_gemini335</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

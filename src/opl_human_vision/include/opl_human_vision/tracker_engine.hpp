@@ -40,6 +40,9 @@ struct Track {
   TrackState state{TrackState::Tentative};
 
   std::string name{"unknown"};
+  opl_interfaces::msg::TrackedHuman observation;
+  geometry_msgs::msg::PointStamped last_fixed_position;
+  bool has_fixed_position{false};
 
   // Pixels / second.
   cv::Point2f velocity{0.0f, 0.0f};
@@ -72,7 +75,9 @@ public:
     int appearance_reid_max_age = 10,
     int appearance_refresh_interval = 15,
     float appearance_spatial_base_ratio = 0.10f,
-    float appearance_spatial_speed_ratio_per_sec = 0.75f
+    float appearance_spatial_speed_ratio_per_sec = 0.75f,
+    double max_age_sec = 2.0, double recovery_age_sec = 2.0,
+    float high_confidence_threshold = 0.45f, double prediction_hold_sec = 0.5
   );
 
   ~TrackerEngine() = default;
@@ -80,13 +85,16 @@ public:
   std::vector<Track> update(
     const std::vector<opl_interfaces::msg::TrackedHuman>& detections,
     const cv::Mat& frame,
-    double timestamp_sec
+    double timestamp_sec,
+    const std::vector<std::vector<float>>& recorded_features = {}
   );
+
+  void reset();
 
   bool appearanceReidReady() const {
     return
       appearance_reid_enabled_ &&
-      appearance_reid_ready_;
+      (appearance_reid_ready_ || supplied_features_);
   }
 
 private:
@@ -168,6 +176,8 @@ private:
   int min_hits_;
   float iou_threshold_;
   int max_publish_age_;
+  float high_confidence_threshold_{0.45f};
+  double prediction_hold_sec_{0.5};
 
 
   // --------------------------------------------------------------------------
@@ -207,6 +217,10 @@ private:
     appearance_states_;
 
 
+  bool spatialMatch(const Track& track, const opl_interfaces::msg::TrackedHuman& detection) const;
+  double max_age_sec_{2.0}, recovery_age_sec_{2.0}, last_update_sec_{0};
+  const std::vector<std::vector<float>>* supplied_features_{nullptr};
+  std::vector<cv::Rect2f> supplied_boxes_;
   int next_id_{1};
 
   cv::Mat prev_frame_gray_;
