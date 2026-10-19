@@ -28,6 +28,9 @@ find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(opl_interfaces REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 
 # Search TensorRT & CUDA paths
 set(TRT_SEARCH_PATHS
@@ -69,6 +72,15 @@ include_directories(
 # Component Libraries
 # ------------------------------------------------------------------------------
 
+# Independent object perception component; human algorithms remain separate.
+add_library(object_detection_node SHARED src/object_detection_node.cpp)
+target_link_libraries(object_detection_node ${TRT_LIBRARIES} ${OpenCV_LIBS})
+ament_target_dependencies(object_detection_node rclcpp rclcpp_components rclcpp_lifecycle
+  sensor_msgs cv_bridge opl_interfaces tf2_ros tf2_geometry_msgs diagnostic_msgs)
+rclcpp_components_register_node(object_detection_node
+  PLUGIN "opl_human_vision::ObjectDetectionNode" EXECUTABLE object_detection_node_exe
+  EXECUTOR MultiThreadedExecutor)
+
 # 1. Human Detector Component Library
 add_library(human_detector_node SHARED
   src/human_detector_node.cpp
@@ -103,7 +115,7 @@ rclcpp_components_register_node(face_recognizer_node PLUGIN "opl_human_vision::F
 # ------------------------------------------------------------------------------
 # Installation Rules
 # ------------------------------------------------------------------------------
-install(TARGETS human_detector_node human_tracker_node face_recognizer_node
+install(TARGETS object_detection_node human_detector_node human_tracker_node face_recognizer_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
@@ -125,6 +137,7 @@ endforeach()
 
 install(PROGRAMS
   scripts/webcam_publisher.py
+  scripts/object_visualizer.py
   scripts/visualizer.py
   scripts/lifecycle_activator.py
   scripts/following_target.py
@@ -137,6 +150,10 @@ ament_export_libraries(human_detector_node human_tracker_node face_recognizer_no
 
 if(BUILD_TESTING)
   enable_testing()
+  add_executable(test_object_perception test/test_object_perception.cpp)
+  target_link_libraries(test_object_perception ${OpenCV_LIBS})
+  target_compile_options(test_object_perception PRIVATE -UNDEBUG)
+  add_test(NAME object_perception COMMAND test_object_perception)
   add_executable(test_pose_nms test/test_pose_nms.cpp)
   target_link_libraries(test_pose_nms ${OpenCV_LIBS})
   target_compile_options(test_pose_nms PRIVATE -UNDEBUG)

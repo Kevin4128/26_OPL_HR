@@ -1,0 +1,20 @@
+object_detection_node:
+  ros__parameters:
+    use_sim_time: true
+    device_id: 0
+    image_topic: /head_cam/image
+    depth_topic: /head_cam/depth_image
+    camera_info_topic: /head_cam/camera_info
+    detections_topic: /detected_objects
+    fixed_frame: odom
+    optical_frame: head_cam_optical_link
+    confidence_threshold: 0.35
+    nms_threshold: 0.5
+    inference_hz: 15.0
+    sync_slop_s: 0.02
+    depth_wait_s: 0.1
+    max_observation_age_s: 0.25
+    tf_timeout_s: 0.1
+    tf_retry_period_s: 0.005
+    min_depth_m: 0.2
+    max_depth_m: 10.0

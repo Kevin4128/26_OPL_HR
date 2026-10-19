@@ -7,3 +7,6 @@ laptop_models/
 build/
 install/
 log/
+
+.private
+docs
