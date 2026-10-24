@@ -12,11 +12,15 @@ def person_label(human):
     # IDs below the session namespace are enrolled identities. Raw IDs remain
     # visible because the enrollment service specifically accepts raw_track_id.
     raw_id = human.raw_track_id if human.raw_track_id > 0 else human.track_id
+    state = getattr(human, 'identity_state', None)
+    name = 'identity uncertain' if state == 3 else human.name
+    if state == 2:
+        name += ' [tracked]'
     named = human.name.lower() not in ('', 'unknown', 'unregistered') and 'scanning' not in human.name.lower()
-    enrolled = named and 0 < human.track_id < 1000000000
+    enrolled = state != 3 and named and 0 < human.track_id < 1000000000
     display_id = human.track_id if enrolled else raw_id
     raw_suffix = f" (raw:{raw_id})" if enrolled else ''
-    return f"ID:{display_id}{raw_suffix} | {human.name} ({human.confidence:.2f})"
+    return f"ID:{display_id}{raw_suffix} | {name} ({human.confidence:.2f})"
 
 class PipelineVisualizer(Node):
     def __init__(self):

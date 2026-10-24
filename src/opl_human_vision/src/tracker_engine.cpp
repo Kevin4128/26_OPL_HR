@@ -332,6 +332,46 @@ std::vector<int> solveHungarian(
   return result;
 }
 
+// Compare complete assignments, including alternatives that leave a track unmatched.
+std::vector<bool> ambiguousAssignments(
+  const std::vector<std::vector<float>>& costs,
+  const std::vector<int>& assignment)
+{
+  constexpr float invalid = 1000000.0f;
+  std::vector<bool> ambiguous(costs.size(), false);
+  auto score = [&](const std::vector<int>& match) {
+    std::pair<int, double> result{0, 0.0};
+    for (size_t row = 0; row < match.size(); ++row) {
+      if (match[row] >= 0 && costs[row][match[row]] < invalid * 0.5f) {
+        ++result.first;
+        result.second += costs[row][match[row]];
+      }
+    }
+    return result;
+  };
+  const auto best = score(assignment);
+  for (size_t row = 0; row < assignment.size(); ++row) {
+    const int col = assignment[row];
+    if (col < 0 || costs[row][col] >= invalid * 0.5f) continue;
+    auto alternative_costs = costs;
+    alternative_costs[row][col] = invalid;
+    const auto alternative = solveHungarian(alternative_costs);
+    if (alternative[row] == col) continue;
+    // score() uses original costs, so explicitly reject the forbidden edge.
+    const auto other = score(alternative);
+    size_t changed = 0;
+    for (size_t i = 0; i < assignment.size(); ++i) {
+      if (assignment[i] != alternative[i]) ++changed;
+    }
+    if (other.first != best.first ||
+        other.second > best.second + 0.05 * changed + 1e-6) continue;
+    for (size_t affected = 0; affected < assignment.size(); ++affected) {
+      if (assignment[affected] != alternative[affected]) ambiguous[affected] = true;
+    }
+  }
+  return ambiguous;
+}
+
 }  // namespace
 
 
@@ -1859,6 +1899,11 @@ std::vector<Track> TrackerEngine::update(
       );
 
 
+  const auto primary_ambiguous = ambiguousAssignments(primary_cost_matrix, primary_assignment);
+  for (size_t i = 0; i < track_count; ++i) {
+    active_tracks_[i].association_ambiguous = primary_ambiguous[i];
+  }
+
   std::vector<bool>
     track_matched(
       track_count,
@@ -1976,7 +2021,7 @@ std::vector<Track> TrackerEngine::update(
       frame,
       timestamp_sec,
 
-      clean_appearance_crop
+      clean_appearance_crop && !active_tracks_[track_idx].association_ambiguous
     );
 
 
@@ -2282,6 +2327,11 @@ std::vector<Track> TrackerEngine::update(
       // ----------------------------------------------------------------------
       // Apply Stage-2 matches.
       // ----------------------------------------------------------------------
+
+      const auto recovery_ambiguous = ambiguousAssignments(appearance_cost_matrix, appearance_assignment);
+      for (size_t i = 0; i < recovery_ambiguous.size(); ++i) {
+        if (recovery_ambiguous[i]) active_tracks_[appearance_track_indices[i]].association_ambiguous = true;
+      }
 
       for (
         std::size_t local_track_idx = 0;

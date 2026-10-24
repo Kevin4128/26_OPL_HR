@@ -1,6 +1,7 @@
 #pragma once
 
 #include "opl_human_vision/scrfd_detector.hpp"
+#include "opl_human_vision/identity_policy.hpp"
 #include "opl_human_vision/adaface_extractor.hpp"
 #include "opl_human_vision/osnet_extractor.hpp"
 
@@ -22,6 +23,7 @@ struct FaceResult {
   std::string name = "Unknown";
   float match_score = 0.0f;
   bool just_scanned = false;
+  IdentityState identity_state{IdentityState::Unconfirmed};
 
   std::vector<cv::Point2f> landmarks;
   std::vector<float> face_embedding;
@@ -109,8 +111,15 @@ public:
     uint64_t raw_track_id,
     const std::set<uint64_t>& occupied_ids,
     const geometry_msgs::msg::Point& position_3d,
-    bool force_deep_reid = false
+    int64_t image_stamp
   );
+
+  FaceResult processFeatures(
+    FaceResult result, uint64_t raw_track_id,
+    const std::set<uint64_t>& occupied_ids,
+    const geometry_msgs::msg::Point& position_3d, int64_t image_stamp);
+
+  void invalidateTrack(uint64_t raw_track_id);
 
   void cleanupStaleRawTracks(
     const std::set<uint64_t>& active_raw_ids
@@ -120,7 +129,10 @@ public:
     uint64_t raw_track_id,
     const std::string& custom_name = "")
   {
+    invalidateTrack(raw_track_id);
     authorized_enrollments_.insert(raw_track_id);
+    pending_enrollments_.erase(raw_track_id);
+    enrollment_stamps_.erase(raw_track_id);
 
     if (!custom_name.empty()) {
       custom_names_request_[raw_track_id] =
@@ -172,8 +184,8 @@ private:
   std::unordered_map<uint64_t, uint64_t>
     active_raw_to_session_map_;
 
-  std::unordered_map<uint64_t, int>
-    track_frame_counters_;
+  std::unordered_map<uint64_t, FaceConfirmation> face_confirmations_;
+  std::unordered_map<uint64_t, int64_t> enrollment_stamps_;
 
   std::unordered_map<uint64_t, PendingEnrollment>
     pending_enrollments_;

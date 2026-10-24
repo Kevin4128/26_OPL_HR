@@ -105,7 +105,22 @@ void FaceEngine::cleanupStaleRawTracks(
 
 
   // --------------------------------------------------------------------------
+  // Enrollment authorization belongs to this observed trajectory only.
+  for (auto it = authorized_enrollments_.begin(); it != authorized_enrollments_.end();) {
+    if (!active_raw_ids.count(*it)) {
+      pending_enrollments_.erase(*it);
+      custom_names_request_.erase(*it);
+      enrollment_stamps_.erase(*it);
+      it = authorized_enrollments_.erase(it);
+    } else ++it;
+  }
+
   // Remove inactive raw -> permanent mappings.
+  for (auto it = face_confirmations_.begin(); it != face_confirmations_.end();) {
+    if (!active_raw_ids.count(it->first)) it = face_confirmations_.erase(it);
+    else ++it;
+  }
+
   // --------------------------------------------------------------------------
 
   for (
@@ -151,30 +166,6 @@ void FaceEngine::cleanupStaleRawTracks(
     {
       it =
         active_raw_to_session_map_.erase(
-          it
-        );
-
-    } else {
-
-      ++it;
-    }
-  }
-
-
-  // Remove unused frame counters.
-  for (
-    auto it =
-      track_frame_counters_.begin();
-
-    it !=
-      track_frame_counters_.end();)
-  {
-    if (
-      active_raw_ids.find(it->first) ==
-      active_raw_ids.end())
-    {
-      it =
-        track_frame_counters_.erase(
           it
         );
 
@@ -499,15 +490,11 @@ FaceResult FaceEngine::processFace(
   uint64_t raw_track_id,
   const std::set<uint64_t>& occupied_ids,
   const geometry_msgs::msg::Point& position_3d,
-  bool force_deep_reid)
+  int64_t image_stamp)
 {
   ScopedTiming timing(
     "FaceEngine.processFace"
   );
-
-
-  cleanupStalePendingTracks();
-  cleanupStaleSessionIdentities();
 
 
   FaceResult result;
@@ -518,12 +505,8 @@ FaceResult FaceEngine::processFace(
     human_crop.cols < 15 ||
     human_crop.rows < 15)
   {
-    return result;
+    return processFeatures(std::move(result), raw_track_id, occupied_ids, position_3d, image_stamp);
   }
-
-
-  const auto now =
-    std::chrono::steady_clock::now();
 
 
   // --------------------------------------------------------------------------
@@ -604,10 +587,48 @@ FaceResult FaceEngine::processFace(
   }
 
 
-  // --------------------------------------------------------------------------
-  // Step 3: Inspect existing raw-track mappings.
-  // --------------------------------------------------------------------------
+  result.body_embedding =
+    osnet_->extract(
+      human_crop
+    );
 
+
+  if (valid_face_quality) {
+
+    cv::Mat aligned_face =
+      adaface_->alignFace(
+        human_crop,
+        landmarks
+      );
+
+
+    result.face_embedding =
+      adaface_->extract(
+        aligned_face
+      );
+  }
+
+  return processFeatures(std::move(result), raw_track_id, occupied_ids, position_3d, image_stamp);
+}
+
+void FaceEngine::invalidateTrack(uint64_t raw_track_id) {
+  active_raw_to_persistent_map_.erase(raw_track_id);
+  active_raw_to_session_map_.erase(raw_track_id);
+  face_confirmations_.erase(raw_track_id);
+  pending_enrollments_.erase(raw_track_id);
+  enrollment_stamps_.erase(raw_track_id);
+  authorized_enrollments_.erase(raw_track_id);
+  custom_names_request_.erase(raw_track_id);
+}
+
+FaceResult FaceEngine::processFeatures(
+  FaceResult result, uint64_t raw_track_id,
+  const std::set<uint64_t>& occupied_ids,
+  const geometry_msgs::msg::Point& position_3d, int64_t image_stamp)
+{
+  cleanupStalePendingTracks();
+  cleanupStaleSessionIdentities();
+  const auto now = std::chrono::steady_clock::now();
   bool enrollment_authorized =
     false;
 
@@ -626,11 +647,6 @@ FaceResult FaceEngine::processFace(
 
 
   if (raw_track_id != 0) {
-
-    track_frame_counters_[
-      raw_track_id
-    ]++;
-
 
     enrollment_authorized =
       authorized_enrollments_.find(
@@ -707,425 +723,56 @@ FaceResult FaceEngine::processFace(
       0;
   }
 
-  const bool has_cached_identity =
-    is_persistent_track ||
-    is_session_track;
-
-
-  // Enrollment must force feature extraction.
-  const bool run_deep_reid =
-    force_deep_reid ||
-    enrollment_authorized ||
-    !has_cached_identity ||
-    (
-      raw_track_id != 0 &&
-      track_frame_counters_[
-        raw_track_id
-      ] % 6 == 0
-    );
-
-
-  // --------------------------------------------------------------------------
-  // Fast path: permanent registered identity.
-  // --------------------------------------------------------------------------
-
-  if (
-    is_persistent_track &&
-    !run_deep_reid)
-  {
-    auto gallery_it =
-      std::find_if(
-        reid_gallery_.begin(),
-        reid_gallery_.end(),
-
-        [cached_persistent_id](
-          const PersistentIdentity& item)
-        {
-          return
-            item.persistent_id ==
-            cached_persistent_id;
-        }
-      );
-
-
-    if (
-      gallery_it !=
-      reid_gallery_.end())
-    {
-      result.persistent_id =
-        cached_persistent_id;
-
-      result.name =
-        gallery_it->name;
-
-      result.match_score =
-        1.0f;
-
-      return result;
-    }
-  }
-
-
-  // --------------------------------------------------------------------------
-  // Fast path: anonymous session identity.
-  //
-  // Do NOT use this path when enrollment is authorized.
-  // Enrollment needs real feature extraction.
-  // --------------------------------------------------------------------------
-
-  if (
-    is_session_track &&
-    !run_deep_reid &&
-    !enrollment_authorized)
-  {
-    auto session_it =
-      std::find_if(
-        session_gallery_.begin(),
-        session_gallery_.end(),
-
-        [cached_session_id](
-          const SessionIdentity& item)
-        {
-          return
-            item.session_id ==
-            cached_session_id;
-        }
-      );
-
-
-    if (
-      session_it !=
-      session_gallery_.end())
-    {
-      session_it->last_seen =
-        now;
-
-
-      result.persistent_id =
-        cached_session_id;
-
-      result.name =
-        "unknown";
-
-      result.match_score =
-        1.0f;
-
-      return result;
-    }
-  }
-
-
-  // --------------------------------------------------------------------------
-  // Step 4: Deep feature extraction.
-  // --------------------------------------------------------------------------
-
-  result.body_embedding =
-    osnet_->extract(
-      human_crop
-    );
-
-
-  if (valid_face_quality) {
-
-    cv::Mat aligned_face =
-      adaface_->alignFace(
-        human_crop,
-        landmarks
-      );
-
-
-    result.face_embedding =
-      adaface_->extract(
-        aligned_face
-      );
-  }
-
-  // --------------------------------------------------------------------------
-  // Step 5: Validate an existing registered mapping.
-  // --------------------------------------------------------------------------
-  if (is_persistent_track) {
-
-    auto gallery_it =
-      std::find_if(
-        reid_gallery_.begin(),
-        reid_gallery_.end(),
-
-        [cached_persistent_id](
-          const PersistentIdentity& item)
-        {
-          return
-            item.persistent_id ==
-            cached_persistent_id;
-        }
-      );
-
-
-    if (
-      gallery_it !=
-      reid_gallery_.end())
-    {
-      const float face_sim =
-        getMaxCosineSimilarity(
-          result.face_embedding,
-          gallery_it->face_gallery
-        );
-
-
-      const float body_sim =
-        getMaxCosineSimilarity(
-          result.body_embedding,
-          gallery_it->body_gallery
-        );
-
-
-      bool has_comparable_embedding =
-        false;
-
-      bool valid_match =
-        false;
-
-
-      if (
-        !result.face_embedding.empty() &&
-        gallery_it->has_face_embedding())
-      {
-        has_comparable_embedding =
-          true;
-
-        valid_match =
-          face_sim >=
-          face_match_threshold_ *
-            0.75f;
-
-      } else if (
-        !result.body_embedding.empty() &&
-        gallery_it->has_body_embedding())
-      {
-        has_comparable_embedding =
-          true;
-
-        // Preserve your existing persistent-body
-        // validation multiplier.
-        valid_match =
-          body_sim >=
-          body_match_threshold_ *
-            0.55f;
-      }
-
-
-      // No comparable feature means validation is inconclusive,
-      // not proof that the identity is wrong.
-      //
-      // Keep the mapping and retry on a future validation.
-      if (!has_comparable_embedding) {
-
-        result.persistent_id =
-          cached_persistent_id;
-
-        result.name =
-          gallery_it->name;
-
-        result.match_score =
-          0.0f;
-
-
-        updateRecentPosition(
-          position_3d,
-          gallery_it->last_position_3d,
-          gallery_it->has_position_3d,
-          gallery_it->last_position_time,
-          now
-        );
-
-
-        return result;
-      }
-
-
-      if (valid_match) {
-
-        addTemplateIfDiverse(
-          gallery_it->body_gallery,
-          result.body_embedding,
-          10,
-          0.82f
-        );
-
-
-        if (
-          !result.face_embedding.empty())
-        {
-          addTemplateIfDiverse(
-            gallery_it->face_gallery,
-            result.face_embedding,
-            6,
-            0.85f
-          );
-        }
-
-
-        result.persistent_id =
-          cached_persistent_id;
-
-        result.name =
-          gallery_it->name;
-
-
-        // Unlike a pure cache hit, this is a real validation result.
-        if (
-          !result.face_embedding.empty() &&
-          gallery_it->has_face_embedding())
-        {
-          result.match_score =
-            face_sim;
-
-        } else {
-
-          result.match_score =
-            body_sim;
-        }
-
-
-        updateRecentPosition(
-          position_3d,
-          gallery_it->last_position_3d,
-          gallery_it->has_position_3d,
-          gallery_it->last_position_time,
-          now
-        );
-
-
-        return result;
-
-      } else {
-
-        // Actual comparable evidence rejected the cached identity.
-        active_raw_to_persistent_map_.erase(
-          raw_track_id
-        );
-
-        is_persistent_track =
-          false;
-      }
-    }
-  }
-
-
-  // --------------------------------------------------------------------------
-  // Step 6: ALWAYS search enrolled identities before anonymous identities.
-  //
-  // This allows a person initially classified as anonymous to later become
-  // recognized when a good face/body view becomes available.
-  // --------------------------------------------------------------------------
-
-  int best_registered_idx =
-    -1;
-
-  float best_registered_sim =
-    -1.0f;
-
-
-  for (
-    size_t i = 0;
-    i < reid_gallery_.size();
-    ++i)
-  {
-    const auto& item =
-      reid_gallery_[i];
-
-
-    if (
-      occupied_ids.find(
-        item.persistent_id
-      ) !=
-      occupied_ids.end())
-    {
-      continue;
-    }
-
-    if (!passesSpatialGate(
-          position_3d,
-          item.last_position_3d,
-          item.has_position_3d,
-          item.last_position_time,
-          now))
-    {
-      continue;
-    }
-
-
-    const float face_sim =
-      getMaxCosineSimilarity(
-        result.face_embedding,
-        item.face_gallery
-      );
-
-
-    const float body_sim =
-      getMaxCosineSimilarity(
-        result.body_embedding,
-        item.body_gallery
-      );
-
-
-    const bool can_use_face =
-      !result.face_embedding.empty() &&
-      item.has_face_embedding();
-
-
-    float combined_sim =
-      0.0f;
-
-
-    if (can_use_face) {
-
-      if (
-        face_sim >=
-        face_match_threshold_)
-      {
-        combined_sim =
-          face_sim;
-
-      } else if (
-        item.has_body_embedding())
-      {
-        combined_sim =
-          0.8f * face_sim +
-          0.2f * body_sim;
-
-      } else {
-
-        combined_sim =
-          face_sim;
-      }
-
+  int best_registered_idx = -1;
+  float best_registered_sim = 0.0f;
+  float runner_up = 0.0f;
+  for (size_t i = 0; i < reid_gallery_.size(); ++i) {
+    const auto& item = reid_gallery_[i];
+    if (result.face_embedding.empty() ||
+        !item.has_face_embedding() ||
+        !passesSpatialGate(position_3d, item.last_position_3d, item.has_position_3d,
+          item.last_position_time, now)) continue;
+    const float similarity = getMaxCosineSimilarity(result.face_embedding, item.face_gallery);
+    if (similarity > best_registered_sim) {
+      runner_up = best_registered_sim;
+      best_registered_sim = similarity;
+      best_registered_idx = static_cast<int>(i);
     } else {
-
-      combined_sim =
-        body_sim;
-    }
-
-
-    const float required_thresh =
-      can_use_face
-      ? face_match_threshold_
-      : body_match_threshold_;
-
-
-    if (
-      combined_sim >=
-        required_thresh &&
-      combined_sim >
-        best_registered_sim)
-    {
-      best_registered_sim =
-        combined_sim;
-
-      best_registered_idx =
-        static_cast<int>(i);
+      runner_up = std::max(runner_up, similarity);
     }
   }
-
+  const bool face_match = best_registered_idx >= 0 &&
+    best_registered_sim >= face_match_threshold_ && best_registered_sim - runner_up >= 0.05f;
+  const uint64_t candidate = face_match ? reid_gallery_[best_registered_idx].persistent_id : 0;
+  if (!enrollment_authorized && candidate && occupied_ids.count(candidate)) {
+    active_raw_to_persistent_map_.erase(raw_track_id);
+    face_confirmations_.erase(raw_track_id);
+    result.identity_state = IdentityState::Uncertain;
+    result.name = "identity uncertain";
+    return result;
+  }
+  // Authorized collection must complete before ordinary recognition can return.
+  const auto decision = decideIdentityAction(face_confirmations_[raw_track_id],
+    is_persistent_track ? cached_persistent_id : 0, candidate, image_stamp);
+  result.identity_state = decision.state;
+  if (!enrollment_authorized && is_persistent_track && decision.id == cached_persistent_id) {
+    auto known = std::find_if(reid_gallery_.begin(), reid_gallery_.end(),
+      [cached_persistent_id](const auto& item) { return item.persistent_id == cached_persistent_id; });
+    if (known != reid_gallery_.end()) {
+      result.persistent_id = cached_persistent_id;
+      result.name = known->name;
+      result.match_score = candidate == cached_persistent_id ? best_registered_sim : 0.0f;
+      updateRecentPosition(position_3d, known->last_position_3d, known->has_position_3d,
+        known->last_position_time, now);
+      // Do not teach an occluded/incorrect face or a potentially contaminated body crop.
+      return result;
+    }
+  }
+  if (!enrollment_authorized && decision.state == IdentityState::Uncertain) {
+    result.name = "identity uncertain";
+    return result;
+  }
+  if (enrollment_authorized || decision.id == 0) best_registered_idx = -1;
 
   // --------------------------------------------------------------------------
   // Registered identity recovered.
@@ -1146,6 +793,7 @@ FaceResult FaceEngine::processFace(
     result.name =
       matched.name;
 
+    result.identity_state = IdentityState::FaceConfirmed;
     result.match_score =
       best_registered_sim;
     
@@ -1243,6 +891,13 @@ FaceResult FaceEngine::processFace(
     pending.last_seen =
       now;
 
+    const auto previous_enrollment_stamp = enrollment_stamps_.find(raw_track_id);
+    if ((previous_enrollment_stamp != enrollment_stamps_.end() &&
+         image_stamp <= previous_enrollment_stamp->second) || result.face_embedding.empty()) {
+      result.name = "Scanning (face required)";
+      return result;
+    }
+    enrollment_stamps_[raw_track_id] = image_stamp;
     pending.frame_count++;
 
 
@@ -1386,6 +1041,7 @@ FaceResult FaceEngine::processFace(
       result.match_score =
         1.0f;
 
+      result.identity_state = IdentityState::FaceConfirmed;
       result.just_scanned =
         true;
 

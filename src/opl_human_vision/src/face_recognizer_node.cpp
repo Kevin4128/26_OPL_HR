@@ -1,5 +1,6 @@
 #include "opl_human_vision/face_recognizer_node.hpp"
 #include "opl_human_vision/scoped_timing.hpp"
+#include "opl_human_vision/identity_tf.hpp"
 #include "rclcpp_components/register_node_macro.hpp"
 
 #include <geometry_msgs/msg/point.hpp>
@@ -163,6 +164,7 @@ FaceRecognizerNode::on_configure(const rclcpp_lifecycle::State &)
     );
 
 
+  person_tf_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
   enroll_srv_ =
     create_service<opl_interfaces::srv::EnrollPerson>(
       "~/enroll_person",
@@ -285,6 +287,7 @@ FaceRecognizerNode::on_cleanup(
   recognized_pub_.reset();
   enroll_srv_.reset();
   face_engine_.reset();
+  person_tf_.reset();
 
 
   {
@@ -294,6 +297,7 @@ FaceRecognizerNode::on_cleanup(
     ever_scanned_pids_.clear();
     pid_to_name_.clear();
     locked_tracks_.clear();
+    uncertain_tracks_.clear();
     last_active_raw_ids_.clear();
   }
 
@@ -315,6 +319,12 @@ void FaceRecognizerNode::handleEnrollService(
   std::shared_ptr<
     opl_interfaces::srv::EnrollPerson::Response> response)
 {
+  if (!recognized_pub_ || !recognized_pub_->is_activated()) {
+    response->success = false;
+    response->message = "Recognizer must be active before enrollment";
+    return;
+  }
+
   uint64_t target_id =
     request->raw_track_id;
 
@@ -334,10 +344,12 @@ void FaceRecognizerNode::handleEnrollService(
 
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    if (target_id == 0 || last_active_raw_ids_.count(target_id) == 0) {
+    const double observation_age = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - last_active_observation_).count();
+    if (observation_age > 0.75 || target_id == 0 || last_active_raw_ids_.count(target_id) == 0) {
       response->success = false;
       response->message =
-        "No active raw track with this ID. Use the ID shown in the visualizer "
+        "No fresh, unambiguous raw track with this ID. Use the ID shown in the visualizer "
         "or raw_track_id=0 to select an active track.";
       return;
     }
@@ -427,6 +439,9 @@ void FaceRecognizerNode::trackedHumansCallback(
   }
 
 
+  const double observation_age = (get_clock()->now() - rclcpp::Time(msg->header.stamp)).seconds();
+  if (observation_age < 0.0 || observation_age > 0.75) return;
+
   ScopedTiming timing(
     "Recognizer.callback_total"
   );
@@ -442,6 +457,8 @@ void FaceRecognizerNode::trackedHumansCallback(
     msg->header.stamp
   );
 
+  int64_t image_stamp = -1;
+
   double min_diff =
     1e9;
 
@@ -450,22 +467,6 @@ void FaceRecognizerNode::trackedHumansCallback(
     std::lock_guard<std::mutex> lock(
       frame_mutex_
     );
-
-
-    if (frame_buffer_.empty()) {
-
-      RCLCPP_DEBUG(
-        rclcpp::get_logger("vision_timing"),
-        "[timing] Recognizer skipped: image buffer empty"
-      );
-
-
-      recognized_pub_->publish(
-        *msg
-      );
-
-      return;
-    }
 
 
     // Remove images that are much older than the tracker frame.
@@ -497,6 +498,7 @@ void FaceRecognizerNode::trackedHumansCallback(
         min_diff =
           diff;
 
+        image_stamp = item.first.nanoseconds();
         frame_ref =
           item.second;
       }
@@ -504,26 +506,8 @@ void FaceRecognizerNode::trackedHumansCallback(
   }
 
 
-  // Do not run recognition on a badly mismatched RGB image.
-  if (
-    frame_ref.empty() ||
-    min_diff > 0.10)
-  {
-    RCLCPP_DEBUG(
-      rclcpp::get_logger("vision_timing"),
-      "[timing] Recognizer skipped: "
-      "no image within 100ms, nearest_diff_ms=%.3f",
-      min_diff * 1000.0
-    );
-
-
-    recognized_pub_->publish(
-      *msg
-    );
-
-    return;
-  }
-
+  // Missing RGB prevents inference, but must not bypass lock/ambiguity maintenance.
+  if (min_diff > 0.10) frame_ref.release();
 
   // --------------------------------------------------------------------------
   // Step 2: Determine RAW tracker IDs visible this frame.
@@ -593,7 +577,7 @@ void FaceRecognizerNode::trackedHumansCallback(
     }
 
 
-    if (raw_id > 0) {
+    if (raw_id > 0 && human.observed) {
       active_raw_ids.insert(
         raw_id
       );
@@ -609,22 +593,10 @@ void FaceRecognizerNode::trackedHumansCallback(
 
     last_active_raw_ids_ =
       active_raw_ids;
-  }
-
-
-  // --------------------------------------------------------------------------
-  // Step 3: Clean FaceEngine raw-track mappings.
-  // --------------------------------------------------------------------------
-
-  {
-    std::lock_guard<std::mutex> engine_lock(
-      engine_mutex_
-    );
-
-
-    face_engine_->cleanupStaleRawTracks(
-      active_raw_ids
-    );
+    for (const auto& human : msg->humans) {
+      if (human.association_ambiguous) last_active_raw_ids_.erase(human.raw_track_id);
+    }
+    last_active_observation_ = std::chrono::steady_clock::now();
   }
 
 
@@ -634,31 +606,13 @@ void FaceRecognizerNode::trackedHumansCallback(
 
   const auto callback_now =
     std::chrono::steady_clock::now();
+  std::set<uint64_t> expired_raw_ids;
 
 
   {
     std::lock_guard<std::mutex> state_lock(
       state_mutex_
     );
-
-
-    // Refresh locks belonging to currently visible raw tracks.
-    for (const uint64_t raw_id : active_raw_ids) {
-
-      auto lock_it =
-        locked_tracks_.find(
-          raw_id
-        );
-
-
-      if (
-        lock_it !=
-        locked_tracks_.end())
-      {
-        lock_it->second.last_seen =
-          callback_now;
-      }
-    }
 
 
     // Expire locks only after grace period.
@@ -676,14 +630,6 @@ void FaceRecognizerNode::trackedHumansCallback(
         active_raw_ids.end();
 
 
-      if (currently_visible) {
-
-        ++it;
-
-        continue;
-      }
-
-
       const double missing_sec =
         std::chrono::duration<double>(
           callback_now -
@@ -692,8 +638,8 @@ void FaceRecognizerNode::trackedHumansCallback(
 
 
       if (
-        missing_sec >
-        identity_lock_grace_sec_)
+        !refreshIdentityLock(it->second.last_seen, callback_now,
+          identity_lock_grace_sec_, currently_visible))
       {
         RCLCPP_INFO(
           get_logger(),
@@ -707,6 +653,7 @@ void FaceRecognizerNode::trackedHumansCallback(
         );
 
 
+        expired_raw_ids.insert(it->first);
         it =
           locked_tracks_.erase(
             it
@@ -810,6 +757,39 @@ void FaceRecognizerNode::trackedHumansCallback(
 
 
   // --------------------------------------------------------------------------
+  // Retain engine mappings through the same bounded dropout as node locks.
+  std::set<uint64_t> retained_raw_ids = active_raw_ids;
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    for (const auto& entry : locked_tracks_) retained_raw_ids.insert(entry.first);
+    for (auto it = uncertain_tracks_.begin(); it != uncertain_tracks_.end();) {
+      if (!retained_raw_ids.count(*it)) it = uncertain_tracks_.erase(it);
+      else ++it;
+    }
+  }
+  {
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    for (const auto raw : expired_raw_ids) face_engine_->invalidateTrack(raw);
+    face_engine_->cleanupStaleRawTracks(retained_raw_ids);
+  }
+
+  // An arbitrary geometric assignment cannot carry an enrolled identity.
+  for (const auto& human : msg->humans) {
+    if (!human.association_ambiguous || human.raw_track_id <= 0) continue;
+    const uint64_t raw = human.raw_track_id;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      locked_tracks_.erase(raw);
+      uncertain_tracks_.insert(raw);
+    }
+    for (auto it = identity_owner.begin(); it != identity_owner.end();) {
+      if (it->second == raw) it = identity_owner.erase(it);
+      else ++it;
+    }
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    face_engine_->invalidateTrack(raw);
+  }
+
   // Step 5: Process each visible raw track.
   // --------------------------------------------------------------------------
 
@@ -861,6 +841,14 @@ void FaceRecognizerNode::trackedHumansCallback(
       static_cast<int32_t>(
         raw_track_id
       );
+
+    if (!human.observed || human.association_ambiguous) {
+      human.identity_state = human.association_ambiguous ? human.UNCERTAIN : human.UNCONFIRMED;
+      human.name = human.association_ambiguous ? "identity uncertain" : "unknown";
+      human.match_score = 0.0f;
+      recognized_array_msg.humans.push_back(human);
+      continue;
+    }
 
     // ------------------------------------------------------------------------
     // Check node-level lock.
@@ -931,13 +919,24 @@ void FaceRecognizerNode::trackedHumansCallback(
     }
 
 
+    if (!is_locked && frame_ref.empty()) {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      human.identity_state = uncertain_tracks_.count(raw_track_id) ? human.UNCERTAIN : human.UNCONFIRMED;
+      human.name = human.identity_state == human.UNCERTAIN ? "identity uncertain" : "unknown";
+      human.match_score = 0.0f;
+      recognized_array_msg.humans.push_back(human);
+      continue;
+    }
+
     // ------------------------------------------------------------------------
     // FAST PATH
     //
     // Existing raw-track lock.
     // ------------------------------------------------------------------------
 
-    if (is_locked && !validation_due) {
+    if (is_locked && (!validation_due || frame_ref.empty())) {
+      human.identity_state = locked_info.persistent_id < 1000000000ULL ? human.TRACKED : human.UNCONFIRMED;
+      human.match_score = 0.0f;
 
       human.raw_track_id =
         static_cast<int32_t>(
@@ -1142,7 +1141,7 @@ void FaceRecognizerNode::trackedHumansCallback(
               raw_track_id,
               occupied_ids_for_raw,
               human.position_3d,
-              force_deep_reid
+              image_stamp
             );
         }
 
@@ -1353,6 +1352,7 @@ void FaceRecognizerNode::trackedHumansCallback(
             );
 
 
+          human.identity_state = static_cast<uint8_t>(result.identity_state);
           human.name =
             result.name;
 
@@ -1429,6 +1429,19 @@ void FaceRecognizerNode::trackedHumansCallback(
 
 
         // --------------------------------------------------------------------
+        {
+          std::lock_guard<std::mutex> state_lock(state_mutex_);
+          if (result.identity_state == IdentityState::Uncertain) uncertain_tracks_.insert(raw_track_id);
+          if (identity_claim_allowed && result.identity_state == IdentityState::FaceConfirmed) {
+            uncertain_tracks_.erase(raw_track_id);
+          } else if (uncertain_tracks_.count(raw_track_id)) {
+            human.track_id = static_cast<int32_t>(raw_track_id);
+            human.name = "identity uncertain";
+            human.match_score = 0.0f;
+            human.identity_state = human.UNCERTAIN;
+          }
+        }
+
         // Determine whether accepted identity is stable enough to lock.
         // --------------------------------------------------------------------
 
@@ -1475,6 +1488,8 @@ void FaceRecognizerNode::trackedHumansCallback(
 
         if (
           identity_claim_allowed &&
+          (human.identity_state == human.FACE_CONFIRMED || human.identity_state == human.TRACKED ||
+            (human.identity_state == human.UNCONFIRMED && result.persistent_id >= 1000000000ULL)) &&
           !result.name.empty() &&
           !is_scanning &&
           !is_unregistered &&
@@ -1532,6 +1547,9 @@ void FaceRecognizerNode::trackedHumansCallback(
     }
 
 
+    if (auto transform = personTransform(human, msg->header, get_clock()->now().seconds())) {
+      person_tf_->sendTransform(*transform);
+    }
     recognized_array_msg.humans.push_back(
       human
     );

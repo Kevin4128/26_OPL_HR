@@ -79,6 +79,7 @@ def generate_launch_description():
     # Topic Definitions
     # -------------------------------------------------------------------------
     image_topic = PythonExpression(["'camera/color/image_raw' if '", LaunchConfiguration('camera_type'), "' == 'gemini335' else 'camera/camera/color/image_raw'"])
+    camera_info_topic = PythonExpression(["'camera/color/camera_info' if '", LaunchConfiguration('camera_type'), "' == 'gemini335' else 'camera/camera/color/camera_info'"])
     detections_topic = 'raw_detections'
     tracked_topic    = 'tracked_humans'
     recognized_topic = 'recognized_humans'
@@ -115,6 +116,7 @@ def generate_launch_description():
                 parameters=[{
                     'image_topic': image_topic,
                     'depth_topic': depth_topic,
+                    'camera_info_topic': camera_info_topic,
                     'detections_topic': detections_topic,
                     'tracked_topic': tracked_topic,
                     'max_age': LaunchConfiguration('tracker_max_age'),

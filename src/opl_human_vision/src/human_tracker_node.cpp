@@ -642,43 +642,12 @@ void HumanTrackerNode::depthCallback(
 void HumanTrackerNode::cameraInfoCallback(
   const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg)
 {
-  if (!has_camera_info_) {
+  std::lock_guard<std::mutex> lock(camera_info_mutex_);
+  camera_info_ = *msg;
+  fx_ = msg->k[0]; fy_ = msg->k[4];
+  cx_ = msg->k[2]; cy_ = msg->k[5];
+  has_camera_info_ = std::isfinite(fx_) && std::isfinite(fy_) && fx_ > 0 && fy_ > 0;
 
-    std::lock_guard<std::mutex> lock(
-      camera_info_mutex_
-    );
-
-
-    if (!has_camera_info_) {
-
-      fx_ =
-        msg->k[0];
-
-      cx_ =
-        msg->k[2];
-
-      fy_ =
-        msg->k[4];
-
-      cy_ =
-        msg->k[5];
-
-
-      has_camera_info_ =
-        true;
-
-
-      RCLCPP_INFO(
-        get_logger(),
-        "Camera Intrinsics Loaded: "
-        "fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f",
-        fx_,
-        fy_,
-        cx_,
-        cy_
-      );
-    }
-  }
 }
 
 
@@ -1185,6 +1154,8 @@ void HumanTrackerNode::detectionsCallback(
       human;
 
 
+    human.observed = track.time_since_update == 0;
+    human.association_ambiguous = track.association_ambiguous;
     human.raw_track_id =
       track.id;
 
@@ -1237,7 +1208,17 @@ void HumanTrackerNode::detectionsCallback(
       );
 
 
-    if (!depth_ref.empty()) {
+    bool calibrated_registered_depth = false;
+    {
+      std::lock_guard<std::mutex> lock(camera_info_mutex_);
+      calibrated_registered_depth = has_camera_info_ && depth_ptr_copy &&
+        !msg->header.frame_id.empty() && camera_info_.header.frame_id == msg->header.frame_id &&
+        depth_ptr_copy->header.frame_id == msg->header.frame_id &&
+        camera_info_.width == static_cast<unsigned>(depth_ref.cols) &&
+        camera_info_.height == static_cast<unsigned>(depth_ref.rows) &&
+        depth_ref.size() == frame_ref.size();
+    }
+    if (!depth_ref.empty() && calibrated_registered_depth && human.observed) {
 
       const cv::Rect rect(
         human.bbox.x_offset,
@@ -1252,6 +1233,9 @@ void HumanTrackerNode::detectionsCallback(
           depth_ref,
           rect
         );
+      const auto& p = human.position_3d;
+      human.position_valid = std::isfinite(p.x) && std::isfinite(p.y) &&
+        std::isfinite(p.z) && p.z > 0;
     }
 
 

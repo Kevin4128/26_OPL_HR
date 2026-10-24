@@ -24,3 +24,10 @@ class VisualizerLabelTest(unittest.TestCase):
         human = SimpleNamespace(raw_track_id=0, track_id=2,
                                 name='Bob', confidence=0.9)
         self.assertEqual(module.person_label(human), 'ID:2 (raw:2) | Bob (0.90)')
+
+    def test_retained_and_uncertain_labels(self):
+        human = SimpleNamespace(raw_track_id=4, track_id=2, name='furia',
+                                confidence=0.9, identity_state=2)
+        self.assertIn('furia [tracked]', module.person_label(human))
+        human.identity_state = 3
+        self.assertEqual(module.person_label(human), 'ID:4 | identity uncertain (0.90)')

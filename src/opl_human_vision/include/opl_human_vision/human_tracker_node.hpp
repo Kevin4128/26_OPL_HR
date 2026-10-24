@@ -149,6 +149,7 @@ private:
   float cy_{0.0f};
 
   bool has_camera_info_{false};
+  sensor_msgs::msg::CameraInfo camera_info_;
 };
 
 }  // namespace opl_human_vision

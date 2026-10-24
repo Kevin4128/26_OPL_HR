@@ -3,6 +3,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <tf2_ros/transform_broadcaster.h>
 #include <opl_interfaces/msg/tracked_human_array.hpp>
 #include <opl_interfaces/srv/enroll_person.hpp>
 
@@ -112,6 +113,8 @@ private:
     opl_interfaces::srv::EnrollPerson
   >::SharedPtr enroll_srv_;
 
+  std::unique_ptr<tf2_ros::TransformBroadcaster> person_tf_;
+
   std::shared_ptr<FaceEngine>
     face_engine_;
 
@@ -143,6 +146,9 @@ private:
 
   std::set<uint64_t>
     last_active_raw_ids_;
+
+  std::set<uint64_t> uncertain_tracks_;
+  std::chrono::steady_clock::time_point last_active_observation_{};
 
   double identity_lock_grace_sec_{1.0};
 

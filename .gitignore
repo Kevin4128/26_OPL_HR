@@ -8,5 +8,6 @@ build/
 install/
 log/
 
+.superpowers/
 .private
 docs

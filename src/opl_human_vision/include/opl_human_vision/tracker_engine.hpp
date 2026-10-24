@@ -36,6 +36,7 @@ struct Track {
   int hit_streak{0};
 
   int time_since_update{0};
+  bool association_ambiguous{false};
 
   TrackState state{TrackState::Tentative};
 
