@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <fstream>
 #include <cstring>
+#include <cmath>
 
 namespace opl_human_vision {
 
@@ -14,7 +15,7 @@ HumanDetectorNode::HumanDetectorNode(const rclcpp::NodeOptions & options)
   declare_parameter<std::string>("image_topic", "camera/image_raw");
   declare_parameter<std::string>("detections_topic", "raw_detections");
   declare_parameter<std::string>("model_path", "");
-  declare_parameter<float>("confidence_threshold", 0.45f);
+  declare_parameter<float>("confidence_threshold", 0.10f);
   declare_parameter<float>("nms_threshold", 0.50f);
   declare_parameter<int>("target_class_id", 0);
   declare_parameter<int>("device_id", 0);
@@ -263,7 +264,7 @@ void HumanDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
 
     for (int i = 0; i < num_anchors_; ++i) {
       float conf = cpu_output_buffer_[4 * num_anchors_ + i];
-      if (conf < conf_thresh_) continue;
+      if (!std::isfinite(conf) || conf < conf_thresh_) continue;
 
       float cx = cpu_output_buffer_[0 * num_anchors_ + i];
       float cy = cpu_output_buffer_[1 * num_anchors_ + i];

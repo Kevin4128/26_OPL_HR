@@ -4,7 +4,7 @@
 
 int main() {
   using namespace opl_human_vision;
-  TrackerEngine tracker(60, 3, 0.35f, 1);
+  TrackerEngine tracker(60, 3, 0.8f, 1);
   opl_interfaces::msg::TrackedHuman a, b;
   a.bbox.x_offset = 10; a.bbox.y_offset = 10;
   a.bbox.width = 100; a.bbox.height = 200; a.confidence = 0.9f;
@@ -23,7 +23,7 @@ int main() {
   for (int i = 0; i < 3; ++i) tracks = tracker.update({a}, {}, t += 1.0/30);
   assert(tracks.size() == 1 && tracks[0].id != first);
   // Equal geometry cannot distinguish two people, even if assignment is stable.
-  TrackerEngine ambiguous(60, 1, 0.35f, 1);
+  TrackerEngine ambiguous(60, 1, 0.8f, 1);
   a.bbox.x_offset = 10; b = a;
   tracks = ambiguous.update({a, b}, {}, 1.0);
   tracks = ambiguous.update({b, a}, {}, 1.0 + 1.0/30);
@@ -33,7 +33,7 @@ int main() {
   assert(std::all_of(tracks.begin(), tracks.end(), [](const Track& x) {
     return x.association_ambiguous;
   }));
-  TrackerEngine separate(60, 1, 0.35f, 1);
+  TrackerEngine separate(60, 1, 0.8f, 1);
   b.bbox.x_offset = 250;
   tracks = separate.update({a, b}, {}, 1.0);
   const int left = tracks[0].id, right = tracks[1].id;
@@ -45,7 +45,7 @@ int main() {
   }
   // Remote people cannot change the certainty of this clearly separated assignment.
   for (int extras : {0, 8}) {
-    TrackerEngine crowd(60, 1, 0.35f, 1);
+    TrackerEngine crowd(60, 1, 0.8f, 1);
     a.bbox.x_offset = 0; b = a; b.bbox.x_offset = 10;
     std::vector<opl_interfaces::msg::TrackedHuman> detections{a, b};
     for (int i = 0; i < extras; ++i) {

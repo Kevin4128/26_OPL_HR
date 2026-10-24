@@ -34,23 +34,24 @@ def generate_launch_description():
     # 2. YOLO Human Detector Node Parameters
     # -------------------------------------------------------------------------
     detector_model_arg = DeclareLaunchArgument('detector_model_path', default_value=default_detector_model)
-    detector_conf_arg  = DeclareLaunchArgument('detector_confidence_threshold', default_value='0.65', description='YOLO confidence detection threshold')
+    detector_conf_arg  = DeclareLaunchArgument('detector_confidence_threshold', default_value='0.10', description='Minimum YOLO score supplied to BoT-SORT; must not exceed tracker_low_threshold')
     detector_nms_arg   = DeclareLaunchArgument('detector_nms_threshold', default_value='0.65', description='YOLO Non-Maximum Suppression threshold')
 
     # -------------------------------------------------------------------------
     # 3. Human Tracker Node Parameters
     # -------------------------------------------------------------------------
-    max_age_arg    = DeclareLaunchArgument('tracker_max_age', default_value='60', description='Max frames to persist a lost track internally')
-    max_publish_age_arg = DeclareLaunchArgument('tracker_max_publish_age', default_value='1', description='Max missed tracker updates before hiding an unmatched track')
+    max_age_arg    = DeclareLaunchArgument('tracker_max_age', default_value='120', description='Max frames to persist a lost track internally')
+    max_publish_age_arg = DeclareLaunchArgument('tracker_max_publish_age', default_value='5', description='Max missed tracker updates before hiding an unmatched track')
     min_hits_arg   = DeclareLaunchArgument('tracker_min_hits', default_value='3', description='Min consecutive detections to confirm a track')
-    iou_thresh_arg = DeclareLaunchArgument('tracker_iou_threshold', default_value='0.35', description='IoU association threshold for tracking')
+    match_thresh_arg = DeclareLaunchArgument('tracker_match_threshold', default_value='0.80', description='BoT-SORT maximum strong-match cost; higher is more permissive')
+    high_thresh_arg = DeclareLaunchArgument('tracker_high_threshold', default_value='0.65', description='Minimum score for strong detection association')
+    low_thresh_arg = DeclareLaunchArgument('tracker_low_threshold', default_value='0.10', description='Weak detection floor; weak detections only maintain established tracks')
+    new_thresh_arg = DeclareLaunchArgument('tracker_new_threshold', default_value='0.70', description='Minimum score to create a new raw track')
+    proximity_thresh_arg = DeclareLaunchArgument('tracker_proximity_threshold', default_value='0.50', description='Maximum IoU distance allowing appearance-assisted association')
 
-    appearance_reid_enabled_arg        = DeclareLaunchArgument('appearance_reid_enabled', default_value='true', description='Enable OSNet appearance-assisted track recovery; false reduces GPU work but may lose IDs after occlusion')
+    appearance_reid_enabled_arg        = DeclareLaunchArgument('appearance_reid_enabled', default_value='true', description='Enable BoT-SORT OSNet appearance association; extracts strong detections each matched RGB frame')
     appearance_match_threshold_arg     = DeclareLaunchArgument('appearance_match_threshold', default_value='0.85', description='Minimum cosine similarity for appearance recovery; higher is stricter and reduces false matches but may miss reappearing people')
     appearance_reid_max_age_arg         = DeclareLaunchArgument('appearance_reid_max_age', default_value='60', description='Maximum missed tracker updates eligible for appearance recovery; 60 is about 2 seconds at 30 Hz; effective lifetime is also limited by tracker_max_age')
-    appearance_refresh_interval_arg    = DeclareLaunchArgument('appearance_refresh_interval', default_value='15', description='Eligible successful matches between appearance-gallery refreshes after initial seeding; higher reduces GPU work but adapts more slowly; overlapping crops skip refresh')
-    appearance_spatial_base_ratio_arg  = DeclareLaunchArgument('appearance_spatial_base_ratio', default_value='0.10', description='Base recovery search radius around predicted box centre as a fraction of max(image width, height); higher allows larger position errors but more competing people')
-    appearance_spatial_speed_ratio_arg = DeclareLaunchArgument('appearance_spatial_speed_ratio_per_sec', default_value='0.75', description='Recovery radius growth per elapsed second since last observation, as a fraction of max(image width, height); radius = base + speed * seconds, capped at 1.0; higher permits faster displacement')
 
     # -------------------------------------------------------------------------
     # 4. Face & Person Recognizer Node Parameters (SCRFD, AdaFace, OSNet)
@@ -122,14 +123,15 @@ def generate_launch_description():
                     'max_age': LaunchConfiguration('tracker_max_age'),
                     'max_publish_age': LaunchConfiguration('tracker_max_publish_age'),
                     'min_hits': LaunchConfiguration('tracker_min_hits'),
-                    'iou_threshold': LaunchConfiguration('tracker_iou_threshold'),
+                    'match_threshold': LaunchConfiguration('tracker_match_threshold'),
+                    'track_high_threshold': LaunchConfiguration('tracker_high_threshold'),
+                    'track_low_threshold': LaunchConfiguration('tracker_low_threshold'),
+                    'new_track_threshold': LaunchConfiguration('tracker_new_threshold'),
+                    'proximity_threshold': LaunchConfiguration('tracker_proximity_threshold'),
                     'osnet_model_path': LaunchConfiguration('osnet_model_path'),
                     'appearance_reid_enabled': LaunchConfiguration('appearance_reid_enabled'),
                     'appearance_match_threshold': LaunchConfiguration('appearance_match_threshold'),
-                    'appearance_reid_max_age': LaunchConfiguration('appearance_reid_max_age'),
-                    'appearance_refresh_interval': LaunchConfiguration('appearance_refresh_interval'),
-                    'appearance_spatial_base_ratio': LaunchConfiguration('appearance_spatial_base_ratio'),
-                    'appearance_spatial_speed_ratio_per_sec': LaunchConfiguration('appearance_spatial_speed_ratio_per_sec')
+                    'appearance_reid_max_age': LaunchConfiguration('appearance_reid_max_age')
                 }],
                 extra_arguments=[{'use_intra_process_comms': True}]
             ),
@@ -231,10 +233,10 @@ def generate_launch_description():
         # Detector Arguments
         detector_model_arg, detector_conf_arg, detector_nms_arg,
         # Tracker Arguments
-        max_age_arg, max_publish_age_arg, min_hits_arg, iou_thresh_arg,
+        max_age_arg, max_publish_age_arg, min_hits_arg, match_thresh_arg,
+        high_thresh_arg, low_thresh_arg, new_thresh_arg, proximity_thresh_arg,
         appearance_reid_enabled_arg, appearance_match_threshold_arg,
-        appearance_reid_max_age_arg, appearance_refresh_interval_arg,
-        appearance_spatial_base_ratio_arg, appearance_spatial_speed_ratio_arg,
+        appearance_reid_max_age_arg,
         # Recognizer & Models Arguments
         scrfd_model_arg, adaface_model_arg, osnet_model_arg,
         scrfd_conf_arg, scrfd_nms_arg,

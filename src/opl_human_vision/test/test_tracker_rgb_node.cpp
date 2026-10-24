@@ -4,6 +4,12 @@
 
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
+  {
+    rclcpp::NodeOptions invalid;
+    invalid.parameter_overrides({rclcpp::Parameter("track_high_threshold", 0.05)});
+    auto node = std::make_shared<opl_human_vision::HumanTrackerNode>(invalid);
+    assert(node->configure().label() == "unconfigured");
+  }
   rclcpp::NodeOptions options;
   options.parameter_overrides({rclcpp::Parameter("min_hits", 1),
     rclcpp::Parameter("appearance_reid_enabled", false),
@@ -67,6 +73,10 @@ int main(int argc, char** argv) {
     assert(output.humans.front().raw_track_id == id);
     assert(output.humans.front().position_valid == matched);
   }
+  input.header.stamp = probe->now();
+  h.confidence = 0.3;
+  exchange(); // the ROS node must pass weak observations to BoT-SORT
+  assert(output.humans.front().raw_track_id == id);
   tracker->deactivate(); tracker->cleanup();
   rclcpp::shutdown();
 }

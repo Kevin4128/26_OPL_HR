@@ -75,3 +75,60 @@ Verification: `colcon test --packages-select opl_human_vision`, then
 with ROS and its local install overlay sourced. The recognizer-dropout test runs
 the real node's lifecycle and subscriptions with GPU inference disabled; feature
 and TF policy tests do not establish live model accuracy or Jetson performance.
+
+## BoT-SORT comparison branch
+
+`jetson_botsort` replaces the custom velocity/appearance-recovery tracker with a
+C++ port of [BoT-SORT](https://github.com/NirAharon/BoT-SORT): an XYWH Kalman filter,
+camera-motion compensation, joint IoU/OSNet association for strong detections,
+IoU recovery from weak detections, tentative confirmation, and tracked/lost
+duplicate removal. The pinned reference, MIT license, and OPL adaptations are in
+[third_party/BoT-SORT](third_party/BoT-SORT/README.md).
+
+Enrollment, recognition, enrolled-ID target selection, depth validity, and TF
+freshness rules are unchanged. Ambiguous associations still require face
+confirmation. A predicted box is not a real observation and cannot produce fresh
+following TF. The default still hides boxes after one missed update; internal
+retention remains 60 updates. Identical clothing cannot resolve a completely
+ambiguous occlusion.
+
+The launch now feeds detections down to `0.10`, with `0.65` for strong matching
+and `0.70` for starting tracks. Weak detections cannot create tracks, confirm
+initial tracks, or reacquire a lost track. Keep `detector_confidence_threshold`
+no higher than `tracker_low_threshold` so weak detection recovery remains usable.
+
+| Launch argument | Default | Meaning |
+| --- | --- | --- |
+| `tracker_low_threshold` | `0.10` | Weak detection floor |
+| `tracker_high_threshold` | `0.65` | Strong detection minimum |
+| `tracker_new_threshold` | `0.70` | New-track minimum |
+| `tracker_match_threshold` | `0.80` | Maximum strong-match cost |
+| `tracker_proximity_threshold` | `0.50` | Maximum IoU distance allowing appearance |
+| `appearance_match_threshold` | `0.85` | Minimum body cosine similarity |
+
+`tracker_iou_threshold`, `appearance_refresh_interval`, and the two
+`appearance_spatial_*` launch arguments belong to the previous tracker and are
+replaced by BoT-SORT's cost/proximity thresholds. OSNet now extracts each clean
+strong detection on matched RGB frames and maintains a normalized feature EMA;
+this costs more GPU work than the previous occasional extraction. Overlapping
+crops, weak detections, and missing RGB cannot refresh that feature.
+
+Save/commit the changes on `jetson_botsort` before switching, so they do not carry
+over into the comparison branch. Stop the running vision pipeline before switching.
+Rebuild and source
+from the ROS workspace root after each switch; switching Git branches alone does
+not replace the previously built shared libraries:
+
+```bash
+cd /home/furia/opl_ros
+source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install --packages-up-to opl_human_vision
+source install/setup.bash
+ros2 launch opl_human_vision test_detector.launch.py camera_type:=gemini335 enable_visualizer:=true
+```
+
+The tracker startup log identifies `BoT-SORT configured`. Use the same recorded
+camera input and camera/model settings on both branches. Compare raw ID switches,
+recovery after occlusion, false tracks, callback time, and FPS; recognition/TF
+should still stop on ambiguity. Camera behavior and Jetson performance require
+hardware testing; the deterministic tests do not establish either.

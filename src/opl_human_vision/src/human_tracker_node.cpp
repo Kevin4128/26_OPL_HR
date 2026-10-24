@@ -58,8 +58,8 @@ HumanTrackerNode::HumanTrackerNode(
   );
 
   declare_parameter<float>(
-    "iou_threshold",
-    0.3f
+    "match_threshold",
+    0.8f
   );
 
   declare_parameter<int>(
@@ -92,20 +92,11 @@ HumanTrackerNode::HumanTrackerNode(
     10
   );
 
-  declare_parameter<int>(
-    "appearance_refresh_interval",
-    15
-  );
+  declare_parameter<float>("track_high_threshold", 0.65f);
+  declare_parameter<float>("track_low_threshold", 0.10f);
+  declare_parameter<float>("new_track_threshold", 0.70f);
+  declare_parameter<float>("proximity_threshold", 0.50f);
 
-  declare_parameter<float>(
-    "appearance_spatial_base_ratio",
-    0.10f
-  );
-
-  declare_parameter<float>(
-    "appearance_spatial_speed_ratio_per_sec",
-    0.75f
-  );
 }
 
 
@@ -156,10 +147,10 @@ HumanTrackerNode::on_configure(
     ).as_int();
 
 
-  const float iou_threshold =
+  const float match_threshold =
     static_cast<float>(
       get_parameter(
-        "iou_threshold"
+        "match_threshold"
       ).as_double()
     );
 
@@ -196,57 +187,25 @@ HumanTrackerNode::on_configure(
     ).as_int();
 
 
-  const int appearance_refresh_interval =
-    get_parameter(
-      "appearance_refresh_interval"
-    ).as_int();
-
-
-  const float appearance_spatial_base_ratio =
-    static_cast<float>(
-      get_parameter(
-        "appearance_spatial_base_ratio"
-      ).as_double()
-    );
-
-
-  const float appearance_spatial_speed_ratio_per_sec =
-    static_cast<float>(
-      get_parameter(
-        "appearance_spatial_speed_ratio_per_sec"
-      ).as_double()
-    );
-
-
-  tracker_ =
-    std::make_shared<TrackerEngine>(
-      max_age,
-      min_hits,
-      iou_threshold,
-      max_publish_age,
-
-      osnet_model_path,
-      appearance_reid_enabled,
-      appearance_match_threshold,
-      appearance_reid_max_age,
-      appearance_refresh_interval,
-      appearance_spatial_base_ratio,
-      appearance_spatial_speed_ratio_per_sec
-    );
-
-
-  RCLCPP_INFO(
-    get_logger(),
-    "Tracker configured: "
-    "max_age=%d, "
-    "max_publish_age=%d, "
-    "min_hits=%d, "
-    "IoU=%.2f",
-    max_age,
-    max_publish_age,
-    min_hits,
-    iou_threshold
-  );
+  const float track_high_threshold = get_parameter("track_high_threshold").as_double();
+  const float track_low_threshold = get_parameter("track_low_threshold").as_double();
+  const float new_track_threshold = get_parameter("new_track_threshold").as_double();
+  const float proximity_threshold = get_parameter("proximity_threshold").as_double();
+  try {
+    tracker_ = std::make_shared<TrackerEngine>(
+      max_age, min_hits, match_threshold, max_publish_age,
+      osnet_model_path, appearance_reid_enabled, appearance_match_threshold,
+      appearance_reid_max_age, track_high_threshold, track_low_threshold,
+      new_track_threshold, proximity_threshold);
+  } catch (const std::exception& error) {
+    RCLCPP_ERROR(get_logger(), "BoT-SORT configuration failed: %s", error.what());
+    return CallbackReturn::FAILURE;
+  }
+  RCLCPP_INFO(get_logger(),
+    "BoT-SORT configured: max_age=%d, max_publish_age=%d, min_hits=%d, "
+    "match=%.2f, high=%.2f, low=%.2f, new=%.2f, proximity=%.2f",
+    max_age, max_publish_age, min_hits, match_threshold, track_high_threshold,
+    track_low_threshold, new_track_threshold, proximity_threshold);
 
 
   if (appearance_reid_enabled) {
@@ -256,17 +215,8 @@ HumanTrackerNode::on_configure(
     {
       RCLCPP_INFO(
         get_logger(),
-        "Tracker appearance ReID enabled: "
-        "threshold=%.3f, "
-        "max_age=%d, "
-        "refresh_interval=%d, "
-        "base_ratio=%.3f, "
-        "speed_ratio=%.3f/sec",
-        appearance_match_threshold,
-        appearance_reid_max_age,
-        appearance_refresh_interval,
-        appearance_spatial_base_ratio,
-        appearance_spatial_speed_ratio_per_sec
+        "BoT-SORT OSNet ReID enabled: cosine_threshold=%.3f, max_age=%d, EMA=0.9",
+        appearance_match_threshold, appearance_reid_max_age
       );
 
     } else {

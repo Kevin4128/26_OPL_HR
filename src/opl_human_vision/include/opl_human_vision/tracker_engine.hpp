@@ -3,7 +3,6 @@
 
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include <opencv2/opencv.hpp>
@@ -11,6 +10,7 @@
 #include "opl_interfaces/msg/tracked_human.hpp"
 
 #include "opl_human_vision/osnet_extractor.hpp"
+#include "opl_human_vision/botsort_kalman.hpp"
 
 namespace opl_human_vision {
 
@@ -42,20 +42,10 @@ struct Track {
 
   std::string name{"unknown"};
 
-  // Pixels / second.
-  cv::Point2f velocity{0.0f, 0.0f};
-
-  // Last REAL detector observation, compensated into the current
-  // camera coordinate frame by GMC while the track is lost.
-  cv::Point2f last_observed_center{0.0f, 0.0f};
-
-  bool velocity_initialized{false};
-
-  // Timestamp corresponding to the latest prediction update.
+  BoTSortKalman kalman;
+  std::vector<float> smooth_feature;
   double last_prediction_time_sec{0.0};
 
-  // Timestamp corresponding to the latest REAL detector observation.
-  double last_observation_time_sec{0.0};
 };
 
 
@@ -64,16 +54,17 @@ public:
   TrackerEngine(
     int max_age = 30,
     int min_hits = 3,
-    float iou_threshold = 0.3f,
+    float match_threshold = 0.8f,
     int max_publish_age = 1,
 
     const std::string& osnet_model_path = "",
     bool appearance_reid_enabled = false,
     float appearance_match_threshold = 0.85f,
     int appearance_reid_max_age = 10,
-    int appearance_refresh_interval = 15,
-    float appearance_spatial_base_ratio = 0.10f,
-    float appearance_spatial_speed_ratio_per_sec = 0.75f
+    float track_high_threshold = 0.65f,
+    float track_low_threshold = 0.10f,
+    float new_track_threshold = 0.70f,
+    float proximity_threshold = 0.50f
   );
 
   ~TrackerEngine() = default;
@@ -91,13 +82,6 @@ public:
   }
 
 private:
-  struct TrackAppearanceState {
-    std::vector<std::vector<float>> body_gallery;
-
-    int successful_matches_since_refresh{0};
-  };
-
-
   cv::Mat estimateCameraMotion(
     const cv::Mat& current_frame
   );
@@ -121,53 +105,17 @@ private:
     const std::vector<float>& b
   ) const;
 
-  float getMaxAppearanceSimilarity(
-    const std::vector<float>& query,
-    const std::vector<std::vector<float>>& gallery
-  ) const;
-
-  void addAppearanceTemplate(
-    TrackAppearanceState& appearance,
-    const std::vector<float>& embedding
-  );
-
-  void maybeRefreshAppearance(
-    const Track& track,
-    const cv::Rect2f& observed_bbox,
-    const cv::Mat& frame
-  );
-
-  bool passesAppearanceSpatialGate(
-    const Track& track,
-    const cv::Rect2f& detection_bbox,
-    const cv::Mat& frame,
-    double timestamp_sec
-  ) const;
+  void updateFeature(Track& track, const std::vector<float>& feature);
 
   void applyDetectionToTrack(
     Track& track,
     const opl_interfaces::msg::TrackedHuman& detection,
-    const cv::Mat& frame,
-    double timestamp_sec,
-    bool refresh_appearance
+    const std::vector<float>& feature
   );
-
-
-  float velocity_smoothing_{0.65f};
-
-  int velocity_decay_after_{5};
-  float velocity_decay_{0.95f};
-
-  double nominal_dt_sec_{1.0 / 30.0};
-
-  double max_prediction_dt_sec_{0.20};
-
-  double min_valid_dt_sec_{1e-4};
-
 
   int max_age_;
   int min_hits_;
-  float iou_threshold_;
+  float match_threshold_;
   int max_publish_age_;
 
 
@@ -181,32 +129,12 @@ private:
   float appearance_match_threshold_{0.85f};
 
   int appearance_reid_max_age_{10};
-  int appearance_refresh_interval_{15};
-
-  // Maximum Stage-2 center displacement:
-  //
-  // allowed_px =
-  //   image_scale *
-  //   (
-  //     base_ratio +
-  //     speed_ratio_per_sec * elapsed_sec
-  //   )
-  //
-  float appearance_spatial_base_ratio_{0.10f};
-
-  float appearance_spatial_speed_ratio_per_sec_{0.75f};
-
-  size_t appearance_gallery_max_size_{3};
-
-  // Only store a new appearance template if it is sufficiently
-  // different from the templates already in the track gallery.
-  float appearance_gallery_diversity_threshold_{0.90f};
-
+  float track_high_threshold_;
+  float track_low_threshold_;
+  float new_track_threshold_;
+  float proximity_threshold_;
   std::unique_ptr<OsnetExtractor> appearance_osnet_;
-
-  std::unordered_map<int, TrackAppearanceState>
-    appearance_states_;
-
+  double last_timestamp_sec_{0.0};
 
   int next_id_{1};
 

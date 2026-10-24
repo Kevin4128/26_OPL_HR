@@ -125,7 +125,7 @@ install(DIRECTORY include/
   DESTINATION include
 )
 
-install(DIRECTORY launch
+install(DIRECTORY launch third_party
   DESTINATION share/${PROJECT_NAME}
 )
 
@@ -149,6 +149,16 @@ ament_export_include_directories(include)
 ament_export_libraries(human_detector_node human_tracker_node face_recognizer_node)
 
 if(BUILD_TESTING)
+  add_executable(test_botsort_reid test/test_botsort_reid.cpp src/tracker_engine.cpp)
+  target_link_libraries(test_botsort_reid ${OpenCV_LIBS})
+  ament_target_dependencies(test_botsort_reid opl_interfaces)
+  target_compile_options(test_botsort_reid PRIVATE -UHAVE_TENSORRT -UNDEBUG)
+  add_test(NAME botsort_reid COMMAND test_botsort_reid)
+  add_executable(test_botsort test/test_botsort.cpp)
+  target_link_libraries(test_botsort human_tracker_node ${OpenCV_LIBS})
+  ament_target_dependencies(test_botsort opl_interfaces)
+  target_compile_options(test_botsort PRIVATE -UNDEBUG)
+  add_test(NAME botsort COMMAND test_botsort)
   add_executable(test_tracker_rgb_node test/test_tracker_rgb_node.cpp)
   target_link_libraries(test_tracker_rgb_node human_tracker_node ${OpenCV_LIBS})
   ament_target_dependencies(test_tracker_rgb_node rclcpp rclcpp_lifecycle cv_bridge opl_interfaces)

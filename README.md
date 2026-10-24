@@ -5,7 +5,7 @@
 ```bash
 source /opt/ros/jazzy/setup.bash
 source ~/orbbec_ws/install/setup.bash  # Gemini 335 driver overlay
-cd ~/opl_ros/src/opl_hr
+cd ~/opl_ros
 colcon build --symlink-install --packages-up-to opl_human_vision
 source install/setup.bash
 ```
