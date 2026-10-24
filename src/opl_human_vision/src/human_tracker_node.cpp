@@ -533,7 +533,7 @@ HumanTrackerNode::on_cleanup(
     );
 
 
-    latest_frame_ptr_.reset();
+    rgb_frames_.clear();
   }
 
 
@@ -592,8 +592,7 @@ void HumanTrackerNode::imageCallback(
     );
 
 
-    latest_frame_ptr_ =
-      cv_ptr;
+    rgb_frames_.push(cv_ptr, get_clock()->now().nanoseconds());
 
   } catch (
     const cv_bridge::Exception& e)
@@ -1036,16 +1035,7 @@ void HumanTrackerNode::detectionsCallback(
     );
 
 
-    if (
-      !latest_frame_ptr_ ||
-      latest_frame_ptr_->image.empty())
-    {
-      return;
-    }
-
-
-    frame_ptr_copy =
-      latest_frame_ptr_;
+    frame_ptr_copy = rgb_frames_.nearest(msg->header, get_clock()->now().nanoseconds());
   }
 
 
@@ -1065,8 +1055,7 @@ void HumanTrackerNode::detectionsCallback(
   }
 
 
-  const cv::Mat frame_ref =
-    frame_ptr_copy->image;
+  const cv::Mat frame_ref = frame_ptr_copy ? frame_ptr_copy->image : cv::Mat();
 
 
   cv::Mat depth_ref;
@@ -1211,7 +1200,7 @@ void HumanTrackerNode::detectionsCallback(
     bool calibrated_registered_depth = false;
     {
       std::lock_guard<std::mutex> lock(camera_info_mutex_);
-      calibrated_registered_depth = has_camera_info_ && depth_ptr_copy &&
+      calibrated_registered_depth = has_camera_info_ && frame_ptr_copy && depth_ptr_copy &&
         !msg->header.frame_id.empty() && camera_info_.header.frame_id == msg->header.frame_id &&
         depth_ptr_copy->header.frame_id == msg->header.frame_id &&
         camera_info_.width == static_cast<unsigned>(depth_ref.cols) &&

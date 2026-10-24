@@ -109,7 +109,7 @@ add_library(face_recognizer_node SHARED
   src/osnet_extractor.cpp
 )
 target_link_libraries(face_recognizer_node ${TRT_LIBRARIES} ${OpenCV_LIBS})
-ament_target_dependencies(face_recognizer_node rclcpp rclcpp_components rclcpp_lifecycle sensor_msgs cv_bridge opl_interfaces tf2_ros)
+ament_target_dependencies(face_recognizer_node rclcpp rclcpp_components rclcpp_lifecycle sensor_msgs cv_bridge opl_interfaces)
 rclcpp_components_register_node(face_recognizer_node PLUGIN "opl_human_vision::FaceRecognizerNode" EXECUTABLE face_recognizer_node_exe)
 
 # ------------------------------------------------------------------------------
@@ -149,19 +149,25 @@ ament_export_include_directories(include)
 ament_export_libraries(human_detector_node human_tracker_node face_recognizer_node)
 
 if(BUILD_TESTING)
+  add_executable(test_tracker_rgb_node test/test_tracker_rgb_node.cpp)
+  target_link_libraries(test_tracker_rgb_node human_tracker_node ${OpenCV_LIBS})
+  ament_target_dependencies(test_tracker_rgb_node rclcpp rclcpp_lifecycle cv_bridge opl_interfaces)
+  target_compile_options(test_tracker_rgb_node PRIVATE -UNDEBUG)
+  add_test(NAME tracker_rgb_node COMMAND test_tracker_rgb_node)
+  add_executable(test_rgb_buffer test/test_rgb_buffer.cpp)
+  target_link_libraries(test_rgb_buffer ${OpenCV_LIBS})
+  ament_target_dependencies(test_rgb_buffer rclcpp cv_bridge)
+  target_compile_options(test_rgb_buffer PRIVATE -UNDEBUG)
+  add_test(NAME rgb_buffer COMMAND test_rgb_buffer)
   # Exercise lifecycle/message logic without GPU models, using the same node sources.
   add_executable(test_recognizer_dropout test/test_recognizer_dropout.cpp
     src/face_recognizer_node.cpp src/face_engine.cpp src/scrfd_detector.cpp
     src/adaface_extractor.cpp src/osnet_extractor.cpp)
   target_link_libraries(test_recognizer_dropout ${OpenCV_LIBS})
   ament_target_dependencies(test_recognizer_dropout rclcpp rclcpp_components rclcpp_lifecycle
-    sensor_msgs cv_bridge opl_interfaces tf2_ros)
+    sensor_msgs cv_bridge opl_interfaces)
   target_compile_options(test_recognizer_dropout PRIVATE -UHAVE_TENSORRT -UNDEBUG)
   add_test(NAME recognizer_dropout COMMAND test_recognizer_dropout)
-  add_executable(test_identity_tf test/test_identity_tf.cpp)
-  ament_target_dependencies(test_identity_tf opl_interfaces geometry_msgs)
-  target_compile_options(test_identity_tf PRIVATE -UNDEBUG)
-  add_test(NAME identity_tf COMMAND test_identity_tf)
   add_executable(test_identity_continuity test/test_identity_continuity.cpp)
   target_link_libraries(test_identity_continuity face_recognizer_node ${OpenCV_LIBS})
   ament_target_dependencies(test_identity_continuity opl_interfaces)

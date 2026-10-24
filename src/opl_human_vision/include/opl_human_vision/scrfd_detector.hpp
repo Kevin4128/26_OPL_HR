@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <utility>
 #include <memory>
 #include <iostream>
 #include <opencv2/opencv.hpp>
@@ -32,6 +33,7 @@ public:
   bool init();
   bool detect(const cv::Mat& human_crop, std::vector<cv::Point2f>& out_landmarks, float& out_score);
 
+  std::pair<float, float> thresholds() const { return {conf_threshold_, nms_threshold_}; }
   void setConfThreshold(float conf_threshold) { conf_threshold_ = conf_threshold; }
   void setNmsThreshold(float nms_threshold) { nms_threshold_ = nms_threshold; }
 

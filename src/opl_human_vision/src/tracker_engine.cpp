@@ -499,6 +499,7 @@ cv::Mat TrackerEngine::estimateCameraMotion(
 
 
   if (current_frame.empty()) {
+    prev_frame_gray_.release();
     return transform;
   }
 

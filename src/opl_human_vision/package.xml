@@ -29,6 +29,7 @@
   <exec_depend>rqt_image_view</exec_depend>
   <exec_depend>opl_gemini335</exec_depend>
 
+  <test_depend>tf2_msgs</test_depend>
   <test_depend>python3-numpy</test_depend>
   <test_depend>rosgraph_msgs</test_depend>
 

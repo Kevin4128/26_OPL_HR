@@ -1,10 +1,13 @@
 #include "opl_human_vision/face_recognizer_node.hpp"
 #include <cassert>
 #include <thread>
+#include <limits>
 
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
   auto recognizer = std::make_shared<opl_human_vision::FaceRecognizerNode>();
+  assert(recognizer->get_parameter("scrfd_conf_threshold").as_double() == 0.45);
+  assert(recognizer->get_parameter("scrfd_nms_threshold").as_double() == 0.30);
   recognizer->configure();
   recognizer->activate();
   auto probe = std::make_shared<rclcpp::Node>("recognizer_dropout_test");
@@ -66,5 +69,13 @@ int main(int argc, char** argv) {
   assert(!expired.get()->success);
   recognizer->deactivate();
   recognizer->cleanup();
+  for (const auto& name : {"scrfd_conf_threshold", "scrfd_nms_threshold"}) {
+    for (double value : {-0.01, 1.01, std::numeric_limits<double>::quiet_NaN()}) {
+      rclcpp::NodeOptions options;
+      options.parameter_overrides({rclcpp::Parameter(name, value)});
+      auto invalid = std::make_shared<opl_human_vision::FaceRecognizerNode>(options);
+      assert(invalid->configure().label() == "unconfigured");
+    }
+  }
   rclcpp::shutdown();
 }

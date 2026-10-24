@@ -1,4 +1,5 @@
-int32 raw_track_id
+# Enrolled identity ID; 0 clears the target and stops person TF updates.
+int32 identity_id
 ---
 bool success
 string message

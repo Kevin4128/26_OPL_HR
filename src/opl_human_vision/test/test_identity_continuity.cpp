@@ -12,6 +12,9 @@ int main() {
   assert(!refreshIdentityLock(seen, start + std::chrono::seconds(5), 3.0, true));
   assert(seen == start + std::chrono::seconds(1));
   FaceEngine engine("", "", "", 0.55f, 0.85f, 2, 0.0f);
+  engine.configureFaceDetector(0.61f, 0.22f);
+  const auto thresholds = engine.detectorThresholds();
+  assert(thresholds.first == 0.61f && thresholds.second == 0.22f);
   geometry_msgs::msg::Point p;
   FaceResult face; face.face_embedding = {1, 0}; face.body_embedding = {1, 0};
   FaceResult body; body.body_embedding = {1, 0};

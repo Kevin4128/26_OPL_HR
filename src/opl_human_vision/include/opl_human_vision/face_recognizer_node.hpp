@@ -3,7 +3,6 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <sensor_msgs/msg/image.hpp>
-#include <tf2_ros/transform_broadcaster.h>
 #include <opl_interfaces/msg/tracked_human_array.hpp>
 #include <opl_interfaces/srv/enroll_person.hpp>
 
@@ -112,8 +111,6 @@ private:
   rclcpp::Service<
     opl_interfaces::srv::EnrollPerson
   >::SharedPtr enroll_srv_;
-
-  std::unique_ptr<tf2_ros::TransformBroadcaster> person_tf_;
 
   std::shared_ptr<FaceEngine>
     face_engine_;

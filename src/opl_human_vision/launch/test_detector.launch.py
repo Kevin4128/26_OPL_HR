@@ -211,6 +211,13 @@ def generate_launch_description():
         output='screen'
     )
 
+    following_target_node = Node(
+        package='opl_human_vision',
+        executable='following_target.py',
+        name='following_target',
+        output='screen',
+    )
+
     activator_node = Node(
         package='opl_human_vision',
         executable='lifecycle_activator.py',
@@ -235,5 +242,5 @@ def generate_launch_description():
         confirm_frames_arg, confirm_dur_arg, identity_lock_grace_arg, session_reid_timeout_arg,
         spatial_gate_age_arg, spatial_gate_base_arg, spatial_speed_arg, depth_gate_arg, identity_validation_arg,
         # Execution Nodes
-        *vision_containers, realsense_node, gemini_node, visualizer_node, activator_node
+        *vision_containers, realsense_node, gemini_node, visualizer_node, following_target_node, activator_node
     ])

@@ -15,6 +15,7 @@
 
 #include "opl_interfaces/msg/tracked_human_array.hpp"
 #include "opl_human_vision/tracker_engine.hpp"
+#include "opl_human_vision/rgb_frame_buffer.hpp"
 
 namespace opl_human_vision {
 
@@ -131,8 +132,7 @@ private:
 
   std::mutex frame_mutex_;
 
-  cv_bridge::CvImageConstPtr
-    latest_frame_ptr_;
+  RgbFrameBuffer rgb_frames_;
 
 
   std::mutex depth_mutex_;

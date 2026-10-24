@@ -1,6 +1,5 @@
 #include "opl_human_vision/face_recognizer_node.hpp"
 #include "opl_human_vision/scoped_timing.hpp"
-#include "opl_human_vision/identity_tf.hpp"
 #include "rclcpp_components/register_node_macro.hpp"
 
 #include <geometry_msgs/msg/point.hpp>
@@ -9,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <cv_bridge/cv_bridge.hpp>
 
 namespace opl_human_vision {
@@ -25,6 +25,8 @@ FaceRecognizerNode::FaceRecognizerNode(const rclcpp::NodeOptions & options)
   declare_parameter<std::string>("adaface_model_path", "");
   declare_parameter<std::string>("osnet_model_path", "");
 
+  declare_parameter<double>("scrfd_conf_threshold", 0.45);
+  declare_parameter<double>("scrfd_nms_threshold", 0.30);
   declare_parameter<float>("match_threshold", 0.45f);
   declare_parameter<float>("body_match_threshold", 0.55f);
 
@@ -132,6 +134,14 @@ FaceRecognizerNode::on_configure(const rclcpp_lifecycle::State &)
       ).as_double()
     );
 
+  const double scrfd_conf = get_parameter("scrfd_conf_threshold").as_double();
+  const double scrfd_nms = get_parameter("scrfd_nms_threshold").as_double();
+  if (!std::isfinite(scrfd_conf) || !std::isfinite(scrfd_nms) ||
+      scrfd_conf < 0 || scrfd_conf > 1 || scrfd_nms < 0 || scrfd_nms > 1) {
+    RCLCPP_ERROR(get_logger(), "SCRFD thresholds must be finite and in [0, 1]");
+    return CallbackReturn::FAILURE;
+  }
+
   face_engine_ = std::make_shared<FaceEngine>(
     scrfd_path,
     adaface_path,
@@ -146,6 +156,11 @@ FaceRecognizerNode::on_configure(const rclcpp_lifecycle::State &)
     spatial_gate_max_speed,
     depth_gate_base
   );
+
+  face_engine_->configureFaceDetector(static_cast<float>(scrfd_conf), static_cast<float>(scrfd_nms));
+  const auto applied_thresholds = face_engine_->detectorThresholds();
+  RCLCPP_INFO(get_logger(), "SCRFD confidence=%.3f NMS=%.3f",
+    applied_thresholds.first, applied_thresholds.second);
 
   if (!face_engine_->loadModels()) {
     RCLCPP_ERROR(
@@ -164,7 +179,6 @@ FaceRecognizerNode::on_configure(const rclcpp_lifecycle::State &)
     );
 
 
-  person_tf_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
   enroll_srv_ =
     create_service<opl_interfaces::srv::EnrollPerson>(
       "~/enroll_person",
@@ -287,7 +301,6 @@ FaceRecognizerNode::on_cleanup(
   recognized_pub_.reset();
   enroll_srv_.reset();
   face_engine_.reset();
-  person_tf_.reset();
 
 
   {
@@ -1547,9 +1560,6 @@ void FaceRecognizerNode::trackedHumansCallback(
     }
 
 
-    if (auto transform = personTransform(human, msg->header, get_clock()->now().seconds())) {
-      person_tf_->sendTransform(*transform);
-    }
     recognized_array_msg.humans.push_back(
       human
     );

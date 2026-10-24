@@ -3,6 +3,7 @@
 #include <iostream>
 #include <cmath>
 #include <algorithm>
+#include <stdexcept>
 
 namespace opl_human_vision {
 
@@ -43,6 +44,15 @@ FaceEngine::FaceEngine(
 
   last_cleanup_time_ =
     std::chrono::steady_clock::now();
+}
+
+void FaceEngine::configureFaceDetector(float confidence, float nms) {
+  if (!std::isfinite(confidence) || !std::isfinite(nms) ||
+      confidence < 0 || confidence > 1 || nms < 0 || nms > 1) {
+    throw std::invalid_argument("SCRFD confidence and NMS thresholds must be finite and in [0, 1]");
+  }
+  scrfd_->setConfThreshold(confidence);
+  scrfd_->setNmsThreshold(nms);
 }
 
 bool FaceEngine::loadModels() {

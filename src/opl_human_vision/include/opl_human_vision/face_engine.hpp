@@ -105,6 +105,8 @@ public:
   );
 
   bool loadModels();
+  void configureFaceDetector(float confidence, float nms);
+  std::pair<float, float> detectorThresholds() const { return scrfd_->thresholds(); }
 
   FaceResult processFace(
     const cv::Mat& human_crop,

@@ -22,14 +22,49 @@ require face reacquisition; identical clothing cannot resolve complete overlap.
 `match_score=0` on `TRACKED` means no fresh confirming face comparison, not an
 unknown identity. Detector `confidence` retains its original meaning.
 
-The recognizer publishes dynamic `opl_hr_person_<enrolled_id>` TF children in the
-measurement's camera optical frame. Only fresh (at most 150 ms), observed, safely
-associated enrolled identities with valid measured positions produce updates.
-Positions require registered depth, matching RGB/depth/calibration frames and
-resolution, and valid intrinsics. No guessed calibration is accepted as a valid
-position. The quaternion is a frame convention, not measured body orientation.
-On loss or uncertainty, updates stop; TF retains historical samples, so consumers
-must check measurement age. No robot motion is commanded by this change.
+Person TF is disabled at startup. Select an enrolled person using the separate
+following service using its enrolled `identity_id`. It must resolve to exactly one
+freshly observed track with valid depth:
+
+```bash
+ros2 service call /select_following_target opl_interfaces/srv/SelectTarget "{identity_id: 1}"
+```
+
+Only that enrolled person's `opl_hr_person_<enrolled_id>` frame receives updates.
+Cancel at any time, even without camera input:
+
+```bash
+ros2 service call /select_following_target opl_interfaces/srv/SelectTarget "{identity_id: 0}"
+```
+
+The selector is started by `test_detector.launch.py`. Selection stays bound to the
+enrolled ID; another person cannot take over through a reused raw ID. TF stops on
+loss, ambiguity, stale observations, or invalid depth. After loss or ambiguity,
+a newer face confirmation of the same enrolled identity is required before updates
+resume, including when that identity returns under a new raw ID. A temporary depth
+failure alone does not require face reacquisition if tracking remains continuous.
+`FollowingTarget.identity_id` identifies the requested person even while `LOST`;
+only `valid=true` means its position is currently usable.
+
+TF uses the camera optical frame and original observation timestamp, with a 150 ms
+freshness limit. The quaternion is a frame convention, not measured body heading.
+TF buffers retain historical samples after cancellation/loss; consumers must check
+measurement age and target validity. This package does not command robot motion.
+
+Tracker RGB is buffered for at most 30 frames and matched to the detection stamp
+within 100 ms, including out-of-order arrivals. Missing RGB disables camera-motion
+and appearance updates while geometric tracking continues. Valid positions require
+matched RGB dimensions/frame metadata, registered depth, and valid calibration.
+The RGB buffer clears on cleanup or a backward ROS clock jump.
+
+`scrfd_conf_threshold` (default `0.45`) and `scrfd_nms_threshold` (default `0.30`)
+are applied to SCRFD during configuration. Values must be finite and in `[0, 1]`;
+parameter changes take effect after reconfiguration, not during active inference.
+
+The optional webcam publisher reconnects at one-second intervals after open failure
+or three consecutive failed reads (immediately detecting a closed device). It permits
+five reconnect attempts, reapplies capture settings, and resets its retry budget only
+after a frame is read successfully. Exhaustion requires restarting the node.
 
 After rebuilding interfaces and the vision package, source this checkout's
 `install/setup.bash` in every launch/consumer terminal and restart the old nodes.
