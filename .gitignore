@@ -10,3 +10,10 @@ log/
 
 .private
 docs
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# HailoRT runtime logs
+hailort.log
