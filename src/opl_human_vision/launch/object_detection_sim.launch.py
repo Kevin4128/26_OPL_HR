@@ -19,26 +19,28 @@ from lifecycle_msgs.msg import Transition
 def generate_launch_description():
     share = get_package_share_directory('opl_human_vision')
     defaults = {
-        'model_path': os.path.join(share, 'laptop_models', 'yolo11m.engine'),
-        'device_id': '0',
+        # yolov8s (~25 FPS standalone on the Hailo-8L) or yolov8m (~15 FPS, more accurate).
+        'model_path': os.path.join(share, 'models', 'hailo8l', 'yolov8s.hef'),
+        'hailo_multi_process': 'false',
         'image_topic': '/head_cam/image',
         'depth_topic': '/head_cam/depth_image',
         'camera_info_topic': '/head_cam/camera_info',
         'detections_topic': '/detected_objects',
         'fixed_frame': 'odom',
         'optical_frame': 'head_cam_optical_link',
-        'inference_hz': '15.0',
+        # Shares the accelerator with the human pipeline when both run; keep modest.
+        'inference_hz': '10.0',
         'use_sim_time': 'true',
         'tf_timeout_s': '0.1',
-        'tf_retry_period_s': '0.005',
+        'tf_retry_period_s': '0.01',
         'enable_visualizer': 'false',
         'annotated_image_topic': '/object_detection/annotated_image',
         'visualizer_hz': '7.5',
     }
     parameters = {
         key: ParameterValue(LaunchConfiguration(key), value_type=(
-            int if key == 'device_id' else float if key in ('inference_hz', 'tf_timeout_s', 'tf_retry_period_s', 'visualizer_hz') else
-            bool if key == 'use_sim_time' else str))
+            float if key in ('inference_hz', 'tf_timeout_s', 'tf_retry_period_s', 'visualizer_hz') else
+            bool if key in ('use_sim_time', 'hailo_multi_process') else str))
         for key in defaults if key not in ('enable_visualizer', 'annotated_image_topic', 'visualizer_hz')
     }
     node = LifecycleNode(
