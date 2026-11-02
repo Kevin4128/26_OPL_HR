@@ -28,6 +28,9 @@
   <exec_depend>rclpy</exec_depend>
   <exec_depend>rqt_image_view</exec_depend>
   <exec_depend>opl_gemini335</exec_depend>
+  <!-- pi5_hailo.launch.py loads orbbec_camera::OBCameraNodeDriver into the vision container -->
+  <exec_depend>orbbec_camera</exec_depend>
+  <exec_depend>image_publisher</exec_depend>
 
   <test_depend>python3-numpy</test_depend>
   <test_depend>rosgraph_msgs</test_depend>

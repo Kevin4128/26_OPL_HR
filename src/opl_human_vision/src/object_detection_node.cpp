@@ -1,5 +1,6 @@
 #include "opl_human_vision/object_detection_node.hpp"
 #include "opl_human_vision/object_perception.hpp"
+#include "opl_human_vision/hailo_model.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -9,9 +10,6 @@
 #include <mutex>
 #include <stdexcept>
 #include <utility>
-#include <NvInfer.h>
-#include <NvInferVersion.h>
-#include <cuda_runtime_api.h>
 #include <cv_bridge/cv_bridge.hpp>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <opl_interfaces/msg/detected_object_array.hpp>
@@ -27,82 +25,29 @@ namespace opl_human_vision {
 namespace {
 using Steady=std::chrono::steady_clock;
 double ms(Steady::duration d) {return std::chrono::duration<double,std::milli>(d).count();}
-void cudaCheck(cudaError_t result) {
-  if (result!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(result));
-}
+// YOLOv8 COCO HEF with on-chip NMS (yolov8s / yolov8m) on the Hailo-8L.
 class ObjectEngine {
-  struct Log : nvinfer1::ILogger {
-    void log(Severity severity,const char *message) noexcept override {
-      if (severity<=Severity::kWARNING) fprintf(stderr,"[Object TensorRT] %s\n",message);
-    }
-  } log_;
-  std::unique_ptr<nvinfer1::IRuntime> runtime_;
-  std::unique_ptr<nvinfer1::ICudaEngine> engine_;
-  std::unique_ptr<nvinfer1::IExecutionContext> context_;
-  cudaStream_t stream_=nullptr;
-  void *input_=nullptr,*output_=nullptr;
-  std::string input_name_,output_name_;
-  int device_=0;
+  std::unique_ptr<HailoModel> model_;
 public:
-  std::vector<float> output=std::vector<float>(84*8400);
-  ~ObjectEngine() {
-    cudaSetDevice(device_);
-    if (stream_) {cudaStreamSynchronize(stream_); cudaStreamDestroy(stream_);}
-    if (input_) cudaFree(input_);
-    if (output_) cudaFree(output_);
+  void load(const std::string &path, const HailoModelOptions &options, float score_threshold, float iou_threshold) {
+    HailoModelOptions o=options;
+    o.nms_score_threshold=score_threshold; o.nms_iou_threshold=iou_threshold;
+    std::string error;
+    model_=HailoModel::create(path,o,error);
+    if (!model_) throw std::runtime_error(error);
+    if (!model_->hasNms() || model_->nmsNumClasses()!=80)
+      throw std::runtime_error("Expected a COCO-80 YOLO HEF with on-chip NMS (e.g. yolov8s.hef): "+path);
   }
-  void load(const std::string &path,int device) {
-#if NV_TENSORRT_MAJOR < 10
-    throw std::runtime_error("Object backend requires TensorRT >=10 named tensor API");
-#endif
-    device_=device; cudaCheck(cudaSetDevice(device_));
-    std::ifstream file(path,std::ios::binary|std::ios::ate);
-    if (!file || file.tellg()<=0) throw std::runtime_error("Cannot read explicit TensorRT engine: "+path);
-    const auto size=file.tellg();
-    std::vector<char> data(static_cast<size_t>(size)); file.seekg(0);
-    if (!file.read(data.data(),size)) throw std::runtime_error("Incomplete engine read");
-    runtime_.reset(nvinfer1::createInferRuntime(log_));
-    if (!runtime_) throw std::runtime_error("Cannot create TensorRT runtime");
-    engine_.reset(runtime_->deserializeCudaEngine(data.data(),data.size()));
-    if (!engine_) throw std::runtime_error("Engine incompatible: rebuild locally from ONNX; no automatic downloads/builds");
-    if (engine_->getNbIOTensors()!=2) throw std::runtime_error("Expected exactly one input and one output");
-    for (int i=0;i<2;++i) {
-      const char *name=engine_->getIOTensorName(i);
-      if (engine_->getTensorDataType(name)!=nvinfer1::DataType::kFLOAT ||
-          engine_->getTensorFormat(name)!=nvinfer1::TensorFormat::kLINEAR ||
-          engine_->getTensorLocation(name)!=nvinfer1::TensorLocation::kDEVICE)
-        throw std::runtime_error("Expected linear float32 engine I/O");
-      const auto d=engine_->getTensorShape(name);
-      if (engine_->getTensorIOMode(name)==nvinfer1::TensorIOMode::kINPUT) {
-        if (!input_name_.empty() || d.nbDims!=4 || d.d[0]!=1 || d.d[1]!=3 || d.d[2]!=640 || d.d[3]!=640)
-          throw std::runtime_error("Expected static input [1,3,640,640]");
-        input_name_=name;
-      } else {
-        if (!output_name_.empty() || d.nbDims!=3 || d.d[0]!=1 || d.d[1]!=84 || d.d[2]!=8400)
-          throw std::runtime_error("Expected static YOLO11 COCO output [1,84,8400]");
-        output_name_=name;
-      }
-    }
-    if (input_name_.empty()||output_name_.empty()) throw std::runtime_error("Missing engine I/O");
-    context_.reset(engine_->createExecutionContext());
-    if (!context_) throw std::runtime_error("Cannot create inference context");
-    cudaCheck(cudaStreamCreate(&stream_));
-    cudaCheck(cudaMalloc(&input_,3*640*640*sizeof(float)));
-    cudaCheck(cudaMalloc(&output_,output.size()*sizeof(float)));
-    if (!context_->setTensorAddress(input_name_.c_str(),input_) ||
-        !context_->setTensorAddress(output_name_.c_str(),output_)) throw std::runtime_error("Tensor address setup failed");
-  }
-  double infer(const cv::Mat &blob) {
-    cudaCheck(cudaSetDevice(device_));
-    cudaCheck(cudaMemcpyAsync(input_,blob.ptr<float>(),3*640*640*sizeof(float),cudaMemcpyHostToDevice,stream_));
-    cudaCheck(cudaStreamSynchronize(stream_));
+  cv::Mat input() {return model_->inputMat();}
+  double infer() {
     const auto start=Steady::now();
-    if (!context_->enqueueV3(stream_)) throw std::runtime_error("TensorRT enqueue failed");
-    cudaCheck(cudaStreamSynchronize(stream_));
-    const double elapsed=ms(Steady::now()-start);
-    cudaCheck(cudaMemcpyAsync(output.data(),output_,output.size()*sizeof(float),cudaMemcpyDeviceToHost,stream_));
-    cudaCheck(cudaStreamSynchronize(stream_));
-    return elapsed;
+    std::string error;
+    if (!model_->run(error)) throw std::runtime_error(error);
+    return ms(Steady::now()-start);
+  }
+  std::vector<objects::Detection> detections(cv::Size size, objects::Letterbox pad, float confidence) const {
+    return objects::decodeHailoNms(model_->nmsData(),model_->nmsFloats(),model_->nmsNumClasses(),
+      model_->inputWidth(),model_->inputHeight(),size,pad,confidence);
   }
 };
 }
@@ -202,10 +147,10 @@ struct ObjectDetectionNode::Impl {
     last_processed_stamp=s;
     try {
       const auto frame=cv_bridge::toCvShare(image,"bgr8");
-      cv::Mat blob;
-      const auto pad=objects::letterbox(frame->image,blob);
-      const double inference=engine->infer(blob);
-      const auto detections=objects::decode(engine->output.data(),84,8400,frame->image.size(),pad,confidence,nms);
+      cv::Mat input=engine->input();
+      const auto pad=objects::letterbox(frame->image,input);
+      const double inference=engine->infer();
+      const auto detections=engine->detections(frame->image.size(),pad,static_cast<float>(confidence));
       std::string depth_error;
       cv_bridge::CvImageConstPtr depth_cv;
       if (image->header.frame_id!=optical_frame) depth_error="unexpected_optical_frame";
@@ -353,7 +298,7 @@ struct ObjectDetectionNode::Impl {
     };
     diagnostic_msgs::msg::DiagnosticArray message; message.header=header;
     diagnostic_msgs::msg::DiagnosticStatus state;
-    state.name="object_detection"; state.hardware_id="TensorRT/CUDA";
+    state.name="object_detection"; state.hardware_id="Hailo-8L";
     state.level=status=="ok"?0:1; state.message=status;
     auto add=[&](const std::string &key,auto value) {
       diagnostic_msgs::msg::KeyValue item; item.key=key; item.value=std::to_string(value); state.values.push_back(item);
@@ -371,7 +316,8 @@ struct ObjectDetectionNode::Impl {
 };
 ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
 :LifecycleNode("object_detection_node",options),impl_(std::make_unique<Impl>(*this)) {
-  declare_parameter("model_path",std::string("")); declare_parameter("device_id",0);
+  declare_parameter("model_path",std::string(""));
+  declare_parameter("hailo_multi_process",false); declare_parameter("hailo_priority",8);
   declare_parameter("image_topic",std::string("/head_cam/image"));
   declare_parameter("depth_topic",std::string("/head_cam/depth_image"));
   declare_parameter("camera_info_topic",std::string("/head_cam/camera_info"));
@@ -404,14 +350,18 @@ ObjectDetectionNode::Return ObjectDetectionNode::on_configure(const rclcpp_lifec
         p.min_depth<=0 || p.max_depth<=p.min_depth || p.fixed_frame.empty() || p.optical_frame.empty())
       throw std::runtime_error("Invalid thresholds, timing, depth range or fixed frame");
     p.engine=std::make_unique<ObjectEngine>();
-    p.engine->load(get_parameter("model_path").as_string(),get_parameter("device_id").as_int());
+    HailoModelOptions hailo;
+    hailo.multi_process_service=get_parameter("hailo_multi_process").as_bool();
+    hailo.scheduler_priority=static_cast<int>(get_parameter("hailo_priority").as_int());
+    p.engine->load(get_parameter("model_path").as_string(),hailo,
+      static_cast<float>(p.confidence),static_cast<float>(p.nms));
     p.publisher=create_publisher<Impl::Array>(get_parameter("detections_topic").as_string(),10);
     p.diagnostics=create_publisher<diagnostic_msgs::msg::DiagnosticArray>("/object_detection/diagnostics",10);
     p.tf=std::make_unique<tf2_ros::Buffer>(get_clock());
     p.listener=std::make_unique<tf2_ros::TransformListener>(*p.tf);
     p.reception=create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     p.work=create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-    RCLCPP_INFO(get_logger(),"YOLO11 COCO static FP32 I/O configured; CUDA inference, CPU preprocessing; fixed_frame=%s",p.fixed_frame.c_str());
+    RCLCPP_INFO(get_logger(),"YOLOv8 COCO HEF configured on Hailo-8L (on-chip NMS); fixed_frame=%s",p.fixed_frame.c_str());
     return Return::SUCCESS;
   } catch (const std::exception &e) {
     impl_->engine.reset(); RCLCPP_ERROR(get_logger(),"Object configure failed: %s",e.what()); return Return::FAILURE;
@@ -433,7 +383,11 @@ ObjectDetectionNode::Return ObjectDetectionNode::on_activate(const rclcpp_lifecy
     [&p](Impl::Info::ConstSharedPtr m){std::lock_guard<std::mutex> lock(p.mutex);
       p.infos.push_back(m); if (p.infos.size()>20) p.infos.pop_front();},opts);
   p.active=true;
-  p.timer=create_wall_timer(std::chrono::milliseconds(2),[&p](){p.tick();},p.work);
+  // The timer only polls for a synchronised frame / pending TF; tie its period
+  // to the TF retry period instead of a fixed 2 ms (500 wakeups/s on the Pi).
+  const auto period=std::chrono::microseconds(static_cast<int64_t>(
+    std::clamp(p.tf_retry_period,0.002,0.01)*1e6));
+  p.timer=create_wall_timer(period,[&p](){p.tick();},p.work);
   return Return::SUCCESS;
 }
 ObjectDetectionNode::Return ObjectDetectionNode::on_deactivate(const rclcpp_lifecycle::State &) {

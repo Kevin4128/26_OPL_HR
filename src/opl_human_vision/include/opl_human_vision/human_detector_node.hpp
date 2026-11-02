@@ -1,54 +1,28 @@
 #ifndef OPL_HUMAN_VISION__HUMAN_DETECTOR_NODE_HPP_
 #define OPL_HUMAN_VISION__HUMAN_DETECTOR_NODE_HPP_
 
+#include <chrono>
 #include <memory>
 #include <string>
 #include <vector>
-#include <iostream>
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <sensor_msgs/msg/image.hpp>
-#include <geometry_msgs/msg/point.hpp>
 #include <cv_bridge/cv_bridge.hpp>
-#include <opencv2/opencv.hpp>
-#include <opencv2/dnn.hpp>
-
-// TensorRT
-#include <NvInfer.h>
-#include <NvInferVersion.h>
-#include <cuda_runtime_api.h>
+#include <opencv2/core.hpp>
 
 #include "opl_interfaces/msg/tracked_human_array.hpp"
+#include "opl_human_vision/hailo_model.hpp"
+#include "opl_human_vision/yolov8_pose_decoder.hpp"
 
 namespace opl_human_vision {
 
-class Logger : public nvinfer1::ILogger {
-public:
-  void log(Severity severity, const char* msg) noexcept override {
-    if (severity <= Severity::kWARNING) {
-      std::cout << "[TRT YOLO-Pose] " << msg << std::endl;
-    }
-  }
-};
-
-struct TrtDeleter {
-  template <typename T>
-  void operator()(T* obj) const {
-    if (obj) {
-#if NV_TENSORRT_MAJOR >= 10
-      delete obj;
-#else
-      obj->destroy();
-#endif
-    }
-  }
-};
-
+// YOLOv8-pose person detector running on the Hailo-8L.
 class HumanDetectorNode : public rclcpp_lifecycle::LifecycleNode {
 public:
   explicit HumanDetectorNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
-  ~HumanDetectorNode() override;
+  ~HumanDetectorNode() override = default;
 
   rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
   on_configure(const rclcpp_lifecycle::State & state) override;
@@ -64,8 +38,6 @@ public:
 
 private:
   void imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg);
-  bool loadTensorRTEngine(const std::string& model_path);
-  void releaseResources();
 
   std::string image_topic_;
   std::string detections_topic_;
@@ -73,29 +45,12 @@ private:
 
   float conf_thresh_{0.45f};
   float nms_thresh_{0.50f};
-  int target_class_id_{0};
-  int device_id_{0};
+  double max_inference_hz_{0.0};
+  std::chrono::steady_clock::time_point next_inference_{};
 
-  // TensorRT Smart Pointers
-  Logger trt_logger_;
-  std::unique_ptr<nvinfer1::IRuntime, TrtDeleter> runtime_{nullptr};
-  std::unique_ptr<nvinfer1::ICudaEngine, TrtDeleter> engine_{nullptr};
-  std::unique_ptr<nvinfer1::IExecutionContext, TrtDeleter> context_{nullptr};
-  cudaStream_t stream_{nullptr};
-
-  void* gpu_buffers_[2]{nullptr, nullptr};
-  float* cpu_input_buffer_{nullptr};  // Allocated as pinned host memory (cudaMallocHost)
-  float* cpu_output_buffer_{nullptr}; // Allocated as pinned host memory (cudaMallocHost)
-
-  // Tensor Names for TensorRT 10+ Compatibility
-  std::string input_tensor_name_;
-  std::string output_tensor_name_;
-
-  // Dynamic Engine Dimensions
-  int input_w_{640};
-  int input_h_{640};
-  int num_anchors_{8400};
-  int num_channels_{56};
+  std::unique_ptr<HailoModel> model_;
+  YoloV8PoseDecoder decoder_;
+  std::vector<PoseCandidate> candidates_;
 
   rclcpp::CallbackGroup::SharedPtr image_cb_group_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <rclcpp/rclcpp.hpp>
+#include <cv_bridge/cv_bridge.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <opl_interfaces/msg/tracked_human_array.hpp>
@@ -119,9 +120,14 @@ private:
 
   std::mutex frame_mutex_;
 
+  // Shared (zero-copy) cv_bridge views of recent frames. Only ~0.3 s of
+  // history is ever used (stale frames are pruned at 0.2 s), so keep the
+  // buffer short instead of deep-copying 30 frames.
   std::deque<
-    std::pair<rclcpp::Time, cv::Mat>
+    std::pair<rclcpp::Time, cv_bridge::CvImageConstPtr>
   > frame_buffer_;
+
+  size_t frame_buffer_size_{10};
 
   std::mutex state_mutex_;
 

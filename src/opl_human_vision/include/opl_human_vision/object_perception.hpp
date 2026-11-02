@@ -7,8 +7,9 @@
 #include <string>
 #include <vector>
 #include <opencv2/core.hpp>
-#include <opencv2/dnn.hpp>
 #include <opencv2/imgproc.hpp>
+
+#include "opl_human_vision/hailo_tensor.hpp"
 
 namespace opl_human_vision::objects {
 inline const std::vector<std::string> labels = {
@@ -25,45 +26,43 @@ inline const std::vector<std::string> labels = {
 
 struct Detection {cv::Rect box; int class_id; float confidence;};
 struct Letterbox {float scale; int left; int top;};
-inline Letterbox letterbox(const cv::Mat &image, cv::Mat &blob) {
-  const float scale = std::min(640.0f / image.cols, 640.0f / image.rows);
-  const int w = std::lround(image.cols * scale), h = std::lround(image.rows * scale);
-  cv::Mat padded(640, 640, CV_8UC3, cv::Scalar(114, 114, 114)), resized;
-  cv::resize(image, resized, cv::Size(w, h));
-  const int left = (640-w)/2, top = (640-h)/2;
-  resized.copyTo(padded(cv::Rect(left, top, w, h)));
-  cv::dnn::blobFromImage(padded, blob, 1.0/255, cv::Size(), cv::Scalar(), true, false);
-  return {scale, left, top};
+
+// Letterbox a BGR frame into a uint8 RGB model input (e.g. HailoModel::inputMat()).
+inline Letterbox letterbox(const cv::Mat &image, cv::Mat &input) {
+  if (input.empty()) input.create(640, 640, CV_8UC3);
+  const auto info = opl_human_vision::letterboxInto(image, input, cv::Scalar(114, 114, 114), true);
+  return {info.scale, info.pad_x, info.pad_y};
 }
-inline std::vector<Detection> decode(const float *data, int channels, int anchors,
-    cv::Size size, Letterbox pad, float confidence, float nms) {
-  if (!data || channels != 84 || anchors != 8400 || pad.scale <= 0)
-    throw std::invalid_argument("Expected YOLO11 COCO float32 [1,84,8400]");
+
+// Parse HailoRT HAILO_NMS_BY_CLASS float32 output (YOLOv8 HEFs with on-chip NMS).
+// Layout, packed per class: float bbox_count, then bbox_count x
+// {y_min, x_min, y_max, x_max, score}, coordinates normalised to the model input.
+// NMS is already done per class on the chip; only thresholding and the
+// letterbox inverse are applied here.
+inline std::vector<Detection> decodeHailoNms(const float *data, size_t data_floats,
+    int num_classes, int input_w, int input_h, cv::Size size, Letterbox pad, float confidence) {
+  if (!data || num_classes <= 0 || input_w <= 0 || input_h <= 0 || pad.scale <= 0)
+    throw std::invalid_argument("Expected Hailo NMS-by-class float32 output");
   std::vector<Detection> result;
-  std::vector<std::vector<cv::Rect>> boxes(80);
-  std::vector<std::vector<float>> scores(80);
-  for (int i=0; i<anchors; ++i) {
-    int best=0;
-    float score=data[4*anchors+i];
-    for (int c=1; c<80; ++c) {
-      const float value=data[(c+4)*anchors+i];
-      if (value>score) {score=value; best=c;}
+  size_t offset = 0;
+  for (int cls = 0; cls < num_classes; ++cls) {
+    if (offset >= data_floats) throw std::invalid_argument("Truncated Hailo NMS buffer");
+    const float count_f = data[offset++];
+    if (!std::isfinite(count_f) || count_f < 0) throw std::invalid_argument("Corrupt Hailo NMS count");
+    const size_t count = static_cast<size_t>(count_f);
+    if (offset + count * 5 > data_floats) throw std::invalid_argument("Truncated Hailo NMS buffer");
+    for (size_t i = 0; i < count; ++i, offset += 5) {
+      const float y1n = data[offset], x1n = data[offset + 1];
+      const float y2n = data[offset + 2], x2n = data[offset + 3], score = data[offset + 4];
+      if (!std::isfinite(score) || score < confidence || score > 1) continue;
+      if (!(std::isfinite(x1n) && std::isfinite(y1n) && std::isfinite(x2n) && std::isfinite(y2n))) continue;
+      const int x1 = std::clamp(static_cast<int>(std::floor((x1n * input_w - pad.left) / pad.scale)), 0, size.width);
+      const int y1 = std::clamp(static_cast<int>(std::floor((y1n * input_h - pad.top) / pad.scale)), 0, size.height);
+      const int x2 = std::clamp(static_cast<int>(std::ceil((x2n * input_w - pad.left) / pad.scale)), 0, size.width);
+      const int y2 = std::clamp(static_cast<int>(std::ceil((y2n * input_h - pad.top) / pad.scale)), 0, size.height);
+      if (x2 <= x1 || y2 <= y1) continue;
+      result.push_back({cv::Rect(x1, y1, x2 - x1, y2 - y1), cls, score});
     }
-    if (!std::isfinite(score) || score<confidence || score>1) continue;
-    const float x=data[i], y=data[anchors+i], w=data[2*anchors+i], h=data[3*anchors+i];
-    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(w) || !std::isfinite(h) ||
-        w<=0 || h<=0 || x<0 || y<0 || x>640 || y>640 || w>1280 || h>1280) continue;
-    const int x1=std::clamp(static_cast<int>(std::floor((x-w/2-pad.left)/pad.scale)),0,size.width);
-    const int y1=std::clamp(static_cast<int>(std::floor((y-h/2-pad.top)/pad.scale)),0,size.height);
-    const int x2=std::clamp(static_cast<int>(std::ceil((x+w/2-pad.left)/pad.scale)),0,size.width);
-    const int y2=std::clamp(static_cast<int>(std::ceil((y+h/2-pad.top)/pad.scale)),0,size.height);
-    if (x2<=x1 || y2<=y1) continue;
-    boxes[best].emplace_back(x1,y1,x2-x1,y2-y1); scores[best].push_back(score);
-  }
-  for (int cls=0; cls<80; ++cls) {
-    std::vector<int> kept;
-    cv::dnn::NMSBoxes(boxes[cls],scores[cls],confidence,nms,kept);
-    for (int i:kept) result.push_back({boxes[cls][i],cls,scores[cls][i]});
   }
   return result;
 }
@@ -98,10 +97,20 @@ inline Surface surface(const cv::Mat &depth, cv::Rect box, double fx, double fy,
     std::max(1,box.width/3),std::max(1,box.height/3));
   struct Sample {float z; int x,y;};
   std::vector<Sample> samples;
-  for (int y=inner.y;y<inner.y+inner.height;++y) for (int x=inner.x;x<inner.x+inner.width;++x) {
-    const float z=depth.type()==CV_16UC1?depth.at<uint16_t>(y,x)*0.001f:depth.at<float>(y,x);
-    if (std::isfinite(z)&&z>=min_depth&&z<=max_depth) samples.push_back({z,x,y});
+  // Subsample large boxes to ~4k pixels: the clustering below sorts all
+  // samples, which dominated CPU time on the Pi for near objects.
+  const int step=std::max(1,static_cast<int>(std::ceil(std::sqrt(inner.area()/4000.0))));
+  samples.reserve(static_cast<size_t>(inner.area()/(step*step)+inner.width+inner.height));
+  const bool u16=depth.type()==CV_16UC1;
+  for (int y=inner.y;y<inner.y+inner.height;y+=step) {
+    const uint16_t *row16=u16?depth.ptr<uint16_t>(y):nullptr;
+    const float *row32=u16?nullptr:depth.ptr<float>(y);
+    for (int x=inner.x;x<inner.x+inner.width;x+=step) {
+      const float z=u16?row16[x]*0.001f:row32[x];
+      if (std::isfinite(z)&&z>=min_depth&&z<=max_depth) samples.push_back({z,x,y});
+    }
   }
+  const int sampled_area=std::max(1,inner.area()/(step*step));
   if (samples.size()<10) {out.status="insufficient_depth"; return out;}
   std::sort(samples.begin(),samples.end(),[](auto &a,auto &b){return a.z<b.z;});
   struct Cluster {size_t begin,end; unsigned center_count;};
@@ -113,7 +122,7 @@ inline Surface surface(const cv::Mat &depth, cv::Rect box, double fx, double fy,
         samples[i].z-samples[start].z<0.12f+0.03f*samples[start].z) continue;
     unsigned central=0;
     for (size_t j=start;j<i;++j) if (center.contains({samples[j].x,samples[j].y})) ++central;
-    if (i-start>=std::max<size_t>(10,inner.area()/20) && central>=3)
+    if (i-start>=std::max<size_t>(10,sampled_area/20) && central>=3)
       clusters.push_back({start,i,central});
     start=i;
   }
@@ -140,6 +149,7 @@ inline Surface surface(const cv::Mat &depth, cv::Rect box, double fx, double fy,
       std::pow((s.y-box.y-box.height/2.0)/box.height,2)+std::pow((s.z-z)/0.05,2);
     if (distance<best) {best=distance; representative=i;}
   }
+  if (step>1) cv::dilate(out.mask,out.mask,cv::getStructuringElement(cv::MORPH_RECT,{step,step}));
   const auto &s=samples[representative];
   out.point={(s.x-cx)*s.z/fx,(s.y-cy)*s.z/fy,s.z};
   if (!std::isfinite(out.point.x) || !std::isfinite(out.point.y) || !std::isfinite(out.point.z)) {

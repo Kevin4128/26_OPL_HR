@@ -11,6 +11,7 @@
 #include <cv_bridge/cv_bridge.hpp>
 #include <opencv2/opencv.hpp>
 
+#include <deque>
 #include <mutex>
 
 #include "opl_interfaces/msg/tracked_human_array.hpp"
@@ -131,8 +132,13 @@ private:
 
   std::mutex frame_mutex_;
 
-  cv_bridge::CvImageConstPtr
-    latest_frame_ptr_;
+  // Small ring of recent RGB frames so re-ID crops and camera-motion
+  // estimation use the frame the detections were computed on, not the newest
+  // one (the detector lags the camera by ~1-3 frames on the Pi).
+  std::deque<cv_bridge::CvImageConstPtr>
+    recent_frames_;
+
+  size_t frame_buffer_size_{6};
 
 
   std::mutex depth_mutex_;

@@ -21,8 +21,16 @@ FaceRecognizerNode::FaceRecognizerNode(const rclcpp::NodeOptions & options)
   declare_parameter<std::string>("recognized_topic", "recognized_humans");
 
   declare_parameter<std::string>("scrfd_model_path", "");
-  declare_parameter<std::string>("adaface_model_path", "");
-  declare_parameter<std::string>("osnet_model_path", "");
+  // ArcFace HEF (arcface_mobilefacenet default, arcface_r50 optional).
+  declare_parameter<std::string>("face_model_path", "");
+  declare_parameter<std::string>("reid_model_path", "");
+  declare_parameter<float>("scrfd_conf_threshold", 0.50f);
+  declare_parameter<float>("scrfd_nms_threshold", 0.40f);
+  // Run SCRFD on cached-identity frames too, only to refresh landmarks for display.
+  declare_parameter<bool>("landmarks_on_cached_frames", false);
+  declare_parameter<bool>("hailo_multi_process", false);
+  declare_parameter<int>("hailo_priority", 12);
+  declare_parameter<int>("frame_buffer_size", 10);
 
   declare_parameter<float>("match_threshold", 0.45f);
   declare_parameter<float>("body_match_threshold", 0.55f);
@@ -62,6 +70,9 @@ FaceRecognizerNode::on_configure(const rclcpp_lifecycle::State &)
   identity_lock_grace_sec_ =
     get_parameter("identity_lock_grace_sec").as_double();
 
+  frame_buffer_size_ = static_cast<size_t>(std::max<int64_t>(
+    1, get_parameter("frame_buffer_size").as_int()));
+
   identity_validation_interval_sec_ =
     get_parameter(
       "identity_validation_interval_sec"
@@ -81,11 +92,17 @@ FaceRecognizerNode::on_configure(const rclcpp_lifecycle::State &)
   const std::string scrfd_path =
     get_parameter("scrfd_model_path").as_string();
 
-  const std::string adaface_path =
-    get_parameter("adaface_model_path").as_string();
+  const std::string face_model_path =
+    get_parameter("face_model_path").as_string();
 
-  const std::string osnet_path =
-    get_parameter("osnet_model_path").as_string();
+  const std::string reid_model_path =
+    get_parameter("reid_model_path").as_string();
+
+  HailoModelOptions hailo_options;
+  hailo_options.multi_process_service =
+    get_parameter("hailo_multi_process").as_bool();
+  hailo_options.scheduler_priority =
+    static_cast<int>(get_parameter("hailo_priority").as_int());
 
 
   const float match_thresh =
@@ -133,8 +150,8 @@ FaceRecognizerNode::on_configure(const rclcpp_lifecycle::State &)
 
   face_engine_ = std::make_shared<FaceEngine>(
     scrfd_path,
-    adaface_path,
-    osnet_path,
+    face_model_path,
+    reid_model_path,
     match_thresh,
     body_thresh,
     min_confirm_frames,
@@ -143,13 +160,19 @@ FaceRecognizerNode::on_configure(const rclcpp_lifecycle::State &)
     spatial_gate_max_age,
     spatial_gate_base,
     spatial_gate_max_speed,
-    depth_gate_base
+    depth_gate_base,
+    hailo_options,
+    static_cast<float>(get_parameter("scrfd_conf_threshold").as_double()),
+    static_cast<float>(get_parameter("scrfd_nms_threshold").as_double()),
+    get_parameter("landmarks_on_cached_frames").as_bool()
   );
 
   if (!face_engine_->loadModels()) {
     RCLCPP_ERROR(
       get_logger(),
-      "Failed to initialize TensorRT models in FaceEngine!"
+      "Failed to load SCRFD / face / re-ID HEFs on the Hailo "
+      "(scrfd='%s', face='%s', reid='%s')",
+      scrfd_path.c_str(), face_model_path.c_str(), reid_model_path.c_str()
     );
 
     return CallbackReturn::FAILURE;
@@ -399,12 +422,12 @@ void FaceRecognizerNode::imageCallback(
 
     frame_buffer_.emplace_back(
       rclcpp::Time(msg->header.stamp),
-      cv_ptr->image.clone()
+      cv_ptr
     );
 
 
     // Bound memory use.
-    while (frame_buffer_.size() > 30) {
+    while (frame_buffer_.size() > frame_buffer_size_) {
       frame_buffer_.pop_front();
     }
 
@@ -435,6 +458,10 @@ void FaceRecognizerNode::trackedHumansCallback(
   // --------------------------------------------------------------------------
   // Step 1: Find camera frame closest to tracker timestamp.
   // --------------------------------------------------------------------------
+
+  // Holding the cv_bridge pointer keeps the underlying image message alive
+  // while frame_ref (a header-only view) is used below.
+  cv_bridge::CvImageConstPtr frame_holder;
 
   cv::Mat frame_ref;
 
@@ -497,8 +524,11 @@ void FaceRecognizerNode::trackedHumansCallback(
         min_diff =
           diff;
 
-        frame_ref =
+        frame_holder =
           item.second;
+
+        frame_ref =
+          item.second->image;
       }
     }
   }

@@ -343,13 +343,14 @@ TrackerEngine::TrackerEngine(
   int min_hits,
   float iou_threshold,
   int max_publish_age,
-  const std::string& osnet_model_path,
+  const std::string& reid_model_path,
   bool appearance_reid_enabled,
   float appearance_match_threshold,
   int appearance_reid_max_age,
   int appearance_refresh_interval,
   float appearance_spatial_base_ratio,
-  float appearance_spatial_speed_ratio_per_sec)
+  float appearance_spatial_speed_ratio_per_sec,
+  const HailoModelOptions& reid_options)
 : max_age_(max_age),
   min_hits_(min_hits),
   iou_threshold_(iou_threshold),
@@ -405,16 +406,17 @@ TrackerEngine::TrackerEngine(
 
   if (
     appearance_reid_enabled_ &&
-    !osnet_model_path.empty())
+    !reid_model_path.empty())
   {
-    appearance_osnet_ =
-      std::make_unique<OsnetExtractor>(
-        osnet_model_path
+    appearance_extractor_ =
+      std::make_unique<ReidExtractor>(
+        reid_model_path,
+        reid_options
       );
 
 
     appearance_reid_ready_ =
-      appearance_osnet_->init();
+      appearance_extractor_->init();
   }
 }
 
@@ -778,7 +780,7 @@ float TrackerEngine::computeIoU(
 
 
 // -----------------------------------------------------------------------------
-// Extract OSNet body embedding from a bbox.
+// Extract re-ID body embedding from a bbox.
 // -----------------------------------------------------------------------------
 
 std::vector<float> TrackerEngine::extractAppearance(
@@ -878,7 +880,7 @@ std::vector<float> TrackerEngine::extractAppearance(
 
 
   return
-    appearance_osnet_->extract(
+    appearance_extractor_->extract(
       person_crop
     );
 }
@@ -1068,9 +1070,9 @@ void TrackerEngine::addAppearanceTemplate(
 
 
 // -----------------------------------------------------------------------------
-// Seed / periodically refresh a confirmed track's OSNet gallery.
+// Seed / periodically refresh a confirmed track's re-ID gallery.
 //
-// This is intentionally low-cadence. OSNet is NOT run every normal frame.
+// This is intentionally low-cadence. re-ID is NOT run every normal frame.
 // -----------------------------------------------------------------------------
 
 void TrackerEngine::maybeRefreshAppearance(

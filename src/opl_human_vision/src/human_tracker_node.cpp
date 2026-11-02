@@ -73,8 +73,23 @@ HumanTrackerNode::HumanTrackerNode(
   // --------------------------------------------------------------------------
 
   declare_parameter<std::string>(
-    "osnet_model_path",
+    "reid_model_path",
     ""
+  );
+
+  declare_parameter<bool>(
+    "hailo_multi_process",
+    false
+  );
+
+  declare_parameter<int>(
+    "frame_buffer_size",
+    6
+  );
+
+  declare_parameter<int>(
+    "hailo_priority",
+    16
   );
 
   declare_parameter<bool>(
@@ -170,10 +185,19 @@ HumanTrackerNode::on_configure(
     ).as_int();
 
 
-  const std::string osnet_model_path =
+  const std::string reid_model_path =
     get_parameter(
-      "osnet_model_path"
+      "reid_model_path"
     ).as_string();
+
+  frame_buffer_size_ = static_cast<size_t>(std::max<int64_t>(
+    1, get_parameter("frame_buffer_size").as_int()));
+
+  HailoModelOptions reid_options;
+  reid_options.multi_process_service =
+    get_parameter("hailo_multi_process").as_bool();
+  reid_options.scheduler_priority =
+    static_cast<int>(get_parameter("hailo_priority").as_int());
 
 
   const bool appearance_reid_enabled =
@@ -225,13 +249,14 @@ HumanTrackerNode::on_configure(
       iou_threshold,
       max_publish_age,
 
-      osnet_model_path,
+      reid_model_path,
       appearance_reid_enabled,
       appearance_match_threshold,
       appearance_reid_max_age,
       appearance_refresh_interval,
       appearance_spatial_base_ratio,
-      appearance_spatial_speed_ratio_per_sec
+      appearance_spatial_speed_ratio_per_sec,
+      reid_options
     );
 
 
@@ -274,7 +299,7 @@ HumanTrackerNode::on_configure(
       RCLCPP_WARN(
         get_logger(),
         "Tracker appearance ReID was requested but "
-        "OSNet could not be initialized. "
+        "the re-ID HEF could not be loaded on the Hailo. "
         "Tracker will continue with geometric association only."
       );
     }
@@ -533,7 +558,7 @@ HumanTrackerNode::on_cleanup(
     );
 
 
-    latest_frame_ptr_.reset();
+    recent_frames_.clear();
   }
 
 
@@ -592,8 +617,13 @@ void HumanTrackerNode::imageCallback(
     );
 
 
-    latest_frame_ptr_ =
-      cv_ptr;
+    recent_frames_.push_back(
+      cv_ptr
+    );
+
+    while (recent_frames_.size() > frame_buffer_size_) {
+      recent_frames_.pop_front();
+    }
 
   } catch (
     const cv_bridge::Exception& e)
@@ -1068,15 +1098,32 @@ void HumanTrackerNode::detectionsCallback(
 
 
     if (
-      !latest_frame_ptr_ ||
-      latest_frame_ptr_->image.empty())
+      recent_frames_.empty() ||
+      recent_frames_.back()->image.empty())
     {
       return;
     }
 
 
+    // Pick the buffered frame whose stamp matches the detections; fall back
+    // to the newest frame if none is within 50 ms (e.g. stamps not copied).
+    const rclcpp::Time det_stamp(msg->header.stamp);
+
     frame_ptr_copy =
-      latest_frame_ptr_;
+      recent_frames_.back();
+
+    int64_t best_ns =
+      50'000'000;
+
+    for (const auto& frame : recent_frames_) {
+      const int64_t delta = std::llabs(
+        (rclcpp::Time(frame->header.stamp) - det_stamp).nanoseconds());
+
+      if (delta <= best_ns) {
+        best_ns = delta;
+        frame_ptr_copy = frame;
+      }
+    }
   }
 
 

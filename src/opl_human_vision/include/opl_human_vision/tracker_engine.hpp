@@ -10,7 +10,7 @@
 
 #include "opl_interfaces/msg/tracked_human.hpp"
 
-#include "opl_human_vision/osnet_extractor.hpp"
+#include "opl_human_vision/reid_extractor.hpp"
 
 namespace opl_human_vision {
 
@@ -66,13 +66,14 @@ public:
     float iou_threshold = 0.3f,
     int max_publish_age = 1,
 
-    const std::string& osnet_model_path = "",
+    const std::string& reid_model_path = "",
     bool appearance_reid_enabled = false,
     float appearance_match_threshold = 0.85f,
     int appearance_reid_max_age = 10,
     int appearance_refresh_interval = 15,
     float appearance_spatial_base_ratio = 0.10f,
-    float appearance_spatial_speed_ratio_per_sec = 0.75f
+    float appearance_spatial_speed_ratio_per_sec = 0.75f,
+    const HailoModelOptions& reid_options = HailoModelOptions{}
   );
 
   ~TrackerEngine() = default;
@@ -201,7 +202,7 @@ private:
   // different from the templates already in the track gallery.
   float appearance_gallery_diversity_threshold_{0.90f};
 
-  std::unique_ptr<OsnetExtractor> appearance_osnet_;
+  std::unique_ptr<ReidExtractor> appearance_extractor_;
 
   std::unordered_map<int, TrackAppearanceState>
     appearance_states_;

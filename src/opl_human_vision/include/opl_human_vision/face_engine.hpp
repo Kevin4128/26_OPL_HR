@@ -1,8 +1,8 @@
 #pragma once
 
 #include "opl_human_vision/scrfd_detector.hpp"
-#include "opl_human_vision/adaface_extractor.hpp"
-#include "opl_human_vision/osnet_extractor.hpp"
+#include "opl_human_vision/face_embedder.hpp"
+#include "opl_human_vision/reid_extractor.hpp"
 
 #include <geometry_msgs/msg/point.hpp>
 
@@ -89,8 +89,8 @@ class FaceEngine {
 public:
   FaceEngine(
     const std::string& scrfd_path,
-    const std::string& adaface_path,
-    const std::string& osnet_path,
+    const std::string& face_model_path,
+    const std::string& reid_model_path,
     float face_match_threshold = 0.50f,
     float body_match_threshold = 0.45f,
     int min_confirm_frames = 5,
@@ -99,7 +99,11 @@ public:
     double spatial_gate_max_age_sec = 2.0,
     float spatial_gate_base_m = 0.75f,
     float spatial_gate_max_speed_mps = 2.5f,
-    float depth_gate_base_m = 0.75f
+    float depth_gate_base_m = 0.75f,
+    const HailoModelOptions& hailo_options = HailoModelOptions{},
+    float scrfd_conf_threshold = 0.50f,
+    float scrfd_nms_threshold = 0.40f,
+    bool landmarks_on_cached_frames = false
   );
 
   bool loadModels();
@@ -135,8 +139,12 @@ public:
 
 private:
   std::unique_ptr<ScrfdDetector> scrfd_;
-  std::unique_ptr<AdaFaceExtractor> adaface_;
-  std::unique_ptr<OsnetExtractor> osnet_;
+  std::unique_ptr<FaceEmbedder> face_embedder_;
+  std::unique_ptr<ReidExtractor> reid_;
+
+  // When false (Pi default), SCRFD is skipped on cached-identity fast paths;
+  // published landmarks are then only refreshed on deep re-ID frames.
+  bool landmarks_on_cached_frames_{false};
 
   float face_match_threshold_;
   float body_match_threshold_;

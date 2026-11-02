@@ -3,8 +3,6 @@
 #include "opl_human_vision/scoped_timing.hpp"
 #include "rclcpp_components/register_node_macro.hpp"
 #include <algorithm>
-#include <fstream>
-#include <cstring>
 
 namespace opl_human_vision {
 
@@ -16,119 +14,11 @@ HumanDetectorNode::HumanDetectorNode(const rclcpp::NodeOptions & options)
   declare_parameter<std::string>("model_path", "");
   declare_parameter<float>("confidence_threshold", 0.45f);
   declare_parameter<float>("nms_threshold", 0.50f);
-  declare_parameter<int>("target_class_id", 0);
-  declare_parameter<int>("device_id", 0);
-}
-
-HumanDetectorNode::~HumanDetectorNode() {
-  releaseResources();
-}
-
-void HumanDetectorNode::releaseResources() {
-  if (device_id_ >= 0) {
-    cudaSetDevice(device_id_);
-  }
-  if (stream_) {
-    cudaStreamDestroy(stream_);
-    stream_ = nullptr;
-  }
-  if (gpu_buffers_[0]) {
-    cudaFree(gpu_buffers_[0]);
-    gpu_buffers_[0] = nullptr;
-  }
-  if (gpu_buffers_[1]) {
-    cudaFree(gpu_buffers_[1]);
-    gpu_buffers_[1] = nullptr;
-  }
-  if (cpu_input_buffer_) {
-    cudaFreeHost(cpu_input_buffer_);
-    cpu_input_buffer_ = nullptr;
-  }
-  if (cpu_output_buffer_) {
-    cudaFreeHost(cpu_output_buffer_);
-    cpu_output_buffer_ = nullptr;
-  }
-
-  context_.reset();
-  engine_.reset();
-  runtime_.reset();
-}
-
-bool HumanDetectorNode::loadTensorRTEngine(const std::string& model_path) {
-  ScopedTiming timing("YOLO.load (attempt)");
-  releaseResources();
-
-  cudaError_t err = cudaSetDevice(device_id_);
-  if (err != cudaSuccess) {
-    RCLCPP_ERROR(get_logger(), "Failed to set CUDA device: %d", device_id_);
-    return false;
-  }
-
-  std::ifstream file(model_path, std::ios::binary);
-  if (!file.good()) {
-    RCLCPP_ERROR(get_logger(), "Engine file not found: %s", model_path.c_str());
-    return false;
-  }
-
-  file.seekg(0, std::ios::end);
-  size_t size = file.tellg();
-  file.seekg(0, std::ios::beg);
-
-  std::vector<char> engine_data(size);
-  file.read(engine_data.data(), size);
-  file.close();
-
-  runtime_.reset(nvinfer1::createInferRuntime(trt_logger_));
-  if (!runtime_) return false;
-
-  engine_.reset(runtime_->deserializeCudaEngine(engine_data.data(), size));
-  if (!engine_) return false;
-
-  context_.reset(engine_->createExecutionContext());
-  if (!context_) return false;
-
-  cudaStreamCreate(&stream_);
-
-  // FIX 1: Robust Dynamic Querying of Tensor Names and Shapes by IO Mode
-#if NV_TENSORRT_MAJOR >= 10
-  for (int i = 0; i < engine_->getNbIOTensors(); ++i) {
-    const char* name = engine_->getIOTensorName(i);
-    if (engine_->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT) {
-      input_tensor_name_ = name;
-      nvinfer1::Dims dims = engine_->getTensorShape(name);
-      if (dims.nbDims == 4) { input_h_ = dims.d[2]; input_w_ = dims.d[3]; }
-    } else if (engine_->getTensorIOMode(name) == nvinfer1::TensorIOMode::kOUTPUT) {
-      output_tensor_name_ = name;
-      nvinfer1::Dims dims = engine_->getTensorShape(name);
-      if (dims.nbDims == 3) { num_channels_ = dims.d[1]; num_anchors_ = dims.d[2]; }
-    }
-  }
-#else
-  nvinfer1::Dims input_dims = engine_->getBindingDimensions(0);
-  nvinfer1::Dims output_dims = engine_->getBindingDimensions(1);
-  if (input_dims.nbDims == 4) { input_h_ = input_dims.d[2]; input_w_ = input_dims.d[3]; }
-  if (output_dims.nbDims == 3) { num_channels_ = output_dims.d[1]; num_anchors_ = output_dims.d[2]; }
-#endif
-
-  RCLCPP_INFO(get_logger(), "Engine Tensor Shapes: Input [%dx%d], Output Channels [%d], Anchors [%d]",
-              input_w_, input_h_, num_channels_, num_anchors_);
-
-  size_t input_size = 1 * 3 * input_h_ * input_w_ * sizeof(float);
-  size_t output_size = 1 * num_channels_ * num_anchors_ * sizeof(float);
-
-  // FIX 2: CUDA allocation status checking
-  cudaError_t status1 = cudaMallocHost(reinterpret_cast<void**>(&cpu_input_buffer_), input_size);
-  cudaError_t status2 = cudaMallocHost(reinterpret_cast<void**>(&cpu_output_buffer_), output_size);
-  cudaError_t status3 = cudaMalloc(&gpu_buffers_[0], input_size);
-  cudaError_t status4 = cudaMalloc(&gpu_buffers_[1], output_size);
-
-  if (status1 != cudaSuccess || status2 != cudaSuccess || status3 != cudaSuccess || status4 != cudaSuccess) {
-    RCLCPP_ERROR(get_logger(), "Failed to allocate CUDA memory buffers!");
-    releaseResources();
-    return false;
-  }
-
-  return true;
+  // 0 = run on every frame the accelerator can keep up with.
+  declare_parameter<double>("max_inference_hz", 0.0);
+  declare_parameter<bool>("hailo_multi_process", false);
+  // Pose drives tracking, so it gets the highest scheduler priority by default.
+  declare_parameter<int>("hailo_priority", 24);
 }
 
 rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
@@ -140,20 +30,29 @@ HumanDetectorNode::on_configure(const rclcpp_lifecycle::State &) {
   model_path_ = get_parameter("model_path").as_string();
   conf_thresh_ = static_cast<float>(get_parameter("confidence_threshold").as_double());
   nms_thresh_ = static_cast<float>(get_parameter("nms_threshold").as_double());
-  target_class_id_ = get_parameter("target_class_id").as_int();
-  device_id_ = get_parameter("device_id").as_int();
+  max_inference_hz_ = get_parameter("max_inference_hz").as_double();
 
   if (model_path_.empty()) {
     RCLCPP_ERROR(get_logger(), "Parameter 'model_path' is required but not set.");
     return CallbackReturn::FAILURE;
   }
 
-  RCLCPP_INFO(get_logger(), "Loading YOLO-Pose TensorRT model on GPU %d from: %s", device_id_, model_path_.c_str());
-
-  if (!loadTensorRTEngine(model_path_)) {
-    RCLCPP_ERROR(get_logger(), "Failed to load TensorRT Pose Engine!");
-    return CallbackReturn::FAILURE;
+  {
+    ScopedTiming timing("YOLO.load (attempt)");
+    HailoModelOptions options;
+    options.multi_process_service = get_parameter("hailo_multi_process").as_bool();
+    options.scheduler_priority = static_cast<int>(get_parameter("hailo_priority").as_int());
+    std::string error;
+    model_ = HailoModel::create(model_path_, options, error);
+    if (!model_ || !decoder_.bind(model_->outputs(), model_->inputWidth(), error)) {
+      RCLCPP_ERROR(get_logger(), "Failed to load YOLOv8-pose HEF '%s': %s",
+        model_path_.c_str(), error.c_str());
+      model_.reset();
+      return CallbackReturn::FAILURE;
+    }
   }
+  RCLCPP_INFO(get_logger(), "Loaded %s on Hailo: input %dx%d, DFL reg_max %d",
+    model_->name().c_str(), model_->inputWidth(), model_->inputHeight(), decoder_.regMax());
 
   detection_pub_ = create_publisher<opl_interfaces::msg::TrackedHumanArray>(
     detections_topic_, rclcpp::SensorDataQoS().keep_last(1)
@@ -197,13 +96,26 @@ HumanDetectorNode::on_deactivate(const rclcpp_lifecycle::State & state) {
 rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
 HumanDetectorNode::on_cleanup(const rclcpp_lifecycle::State &) {
   detection_pub_.reset();
-  releaseResources();
+  model_.reset();
   return CallbackReturn::SUCCESS;
 }
 
 void HumanDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg) {
-  if (!detection_pub_->is_activated() || !engine_) {
+  if (!detection_pub_->is_activated() || !model_) {
     return;
+  }
+
+  if (max_inference_hz_ > 0.0) {
+    // Deadline schedule with a small tolerance: a plain "elapsed < period"
+    // check aliases against the camera rate (15 Hz cap on 30 fps -> 10 Hz).
+    using namespace std::chrono;
+    const auto now = steady_clock::now();
+    const auto period = duration_cast<steady_clock::duration>(duration<double>(1.0 / max_inference_hz_));
+    const auto tolerance = duration_cast<steady_clock::duration>(milliseconds(8));
+    if (now + tolerance < next_inference_) {
+      return;
+    }
+    next_inference_ = std::max(next_inference_ + period, now - period / 2);
   }
 
   try {
@@ -213,79 +125,49 @@ void HumanDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
       return;
     }
 
-    cv::Mat img = cv_ptr->image;
+    const cv::Mat & img = cv_ptr->image;
     int img_w = img.cols;
     int img_h = img.rows;
 
-    // 1. Letterbox Preprocessing
-    float scale = std::min(static_cast<float>(input_w_) / img_w, static_cast<float>(input_h_) / img_h);
-    int unpad_w = std::round(img_w * scale);
-    int unpad_h = std::round(img_h * scale);
-    int pad_x = (input_w_ - unpad_w) / 2;
-    int pad_y = (input_h_ - unpad_h) / 2;
+    // 1. Letterbox straight into the Hailo input buffer (uint8 RGB; the
+    //    normalisation is compiled into the HEF).
+    cv::Mat input = model_->inputMat();
+    const LetterboxInfo lb = letterboxInto(img, input, cv::Scalar(114, 114, 114), true);
 
-    cv::Mat resized;
-    cv::resize(img, resized, cv::Size(unpad_w, unpad_h));
-    cv::Mat canvas(input_h_, input_w_, CV_8UC3, cv::Scalar(114, 114, 114));
-    resized.copyTo(canvas(cv::Rect(pad_x, pad_y, unpad_w, unpad_h)));
-
-    // 2. Optimized Preprocessing: BGR->RGB conversion and HWC->CHW transposition
-    cv::Mat blob = cv::dnn::blobFromImage(
-        canvas, 1.0 / 255.0, cv::Size(input_w_, input_h_),
-        cv::Scalar(0, 0, 0), true, false
-    );
-    size_t channel_size = input_w_ * input_h_;
-    std::memcpy(cpu_input_buffer_, blob.ptr<float>(), 3 * channel_size * sizeof(float));
-
-    // 3. CUDA Async Inference
+    // 2. Inference on the Hailo-8L (scheduler shares the chip with the other models).
     {
-    ScopedTiming inference_timing("YOLO.inference_and_transfers");
-    cudaSetDevice(device_id_);
-    cudaMemcpyAsync(gpu_buffers_[0], cpu_input_buffer_, 3 * channel_size * sizeof(float), cudaMemcpyHostToDevice, stream_);
-
-#if NV_TENSORRT_MAJOR >= 10
-    context_->setTensorAddress(input_tensor_name_.c_str(), gpu_buffers_[0]);
-    context_->setTensorAddress(output_tensor_name_.c_str(), gpu_buffers_[1]);
-    context_->enqueueV3(stream_);
-#else
-    void* bindings[] = {gpu_buffers_[0], gpu_buffers_[1]};
-    context_->enqueueV2(bindings, stream_, nullptr);
-#endif
-
-    cudaMemcpyAsync(cpu_output_buffer_, gpu_buffers_[1], num_channels_ * num_anchors_ * sizeof(float), cudaMemcpyDeviceToHost, stream_);
-    cudaStreamSynchronize(stream_);
+      ScopedTiming inference_timing("YOLO.hailo_inference");
+      std::string error;
+      if (!model_->run(error)) {
+        RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000, "%s", error.c_str());
+        return;
+      }
     }
 
-    // 4. Postprocessing: Parse Predictions
+    // 3. Decode only anchors above the score threshold, then undo the letterbox.
+    decoder_.decode(model_->outputs(), conf_thresh_, candidates_);
+
     std::vector<cv::Rect> bboxes;
     std::vector<float> confidences;
     std::vector<std::vector<cv::Point3f>> keypoints_list;
+    bboxes.reserve(candidates_.size());
+    confidences.reserve(candidates_.size());
+    keypoints_list.reserve(candidates_.size());
 
-    for (int i = 0; i < num_anchors_; ++i) {
-      float conf = cpu_output_buffer_[4 * num_anchors_ + i];
-      if (conf < conf_thresh_) continue;
-
-      float cx = cpu_output_buffer_[0 * num_anchors_ + i];
-      float cy = cpu_output_buffer_[1 * num_anchors_ + i];
-      float w = cpu_output_buffer_[2 * num_anchors_ + i];
-      float h = cpu_output_buffer_[3 * num_anchors_ + i];
-
-      int x = static_cast<int>((cx - w / 2.0f - pad_x) / scale);
-      int y = static_cast<int>((cy - h / 2.0f - pad_y) / scale);
-      int width = static_cast<int>(w / scale);
-      int height = static_cast<int>(h / scale);
-
+    for (const auto & c : candidates_) {
+      const cv::Point2f tl = lb.toImage(c.x1, c.y1);
+      const cv::Point2f br = lb.toImage(c.x2, c.y2);
       std::vector<cv::Point3f> kps;
-      for (int k = 0; k < 17; ++k) {
-        float kx = (cpu_output_buffer_[(5 + k * 3 + 0) * num_anchors_ + i] - pad_x) / scale;
-        float ky = (cpu_output_buffer_[(5 + k * 3 + 1) * num_anchors_ + i] - pad_y) / scale;
-        float kc = cpu_output_buffer_[(5 + k * 3 + 2) * num_anchors_ + i];
-        kps.emplace_back(kx, ky, kc);
+      kps.reserve(c.keypoints.size());
+      for (const auto & kp : c.keypoints) {
+        const cv::Point2f p = lb.toImage(kp.x, kp.y);
+        kps.emplace_back(p.x, p.y, kp.z);
       }
-
-      bboxes.emplace_back(x, y, width, height);
-      confidences.push_back(conf);
-      keypoints_list.push_back(kps);
+      bboxes.emplace_back(
+        static_cast<int>(tl.x), static_cast<int>(tl.y),
+        static_cast<int>(br.x - tl.x), static_cast<int>(br.y - tl.y));
+      confidences.push_back(c.score);
+      keypoints_list.push_back(std::move(kps));
     }
 
     // 5. NMS (Non-Maximum Suppression)

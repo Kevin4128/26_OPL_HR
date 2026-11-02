@@ -8,8 +8,8 @@ namespace opl_human_vision {
 
 FaceEngine::FaceEngine(
   const std::string& scrfd_path,
-  const std::string& adaface_path,
-  const std::string& osnet_path,
+  const std::string& face_model_path,
+  const std::string& reid_model_path,
   float face_match_threshold,
   float body_match_threshold,
   int min_confirm_frames,
@@ -18,8 +18,13 @@ FaceEngine::FaceEngine(
   double spatial_gate_max_age_sec,
   float spatial_gate_base_m,
   float spatial_gate_max_speed_mps,
-  float depth_gate_base_m)
-: face_match_threshold_(face_match_threshold),
+  float depth_gate_base_m,
+  const HailoModelOptions& hailo_options,
+  float scrfd_conf_threshold,
+  float scrfd_nms_threshold,
+  bool landmarks_on_cached_frames)
+: landmarks_on_cached_frames_(landmarks_on_cached_frames),
+  face_match_threshold_(face_match_threshold),
   body_match_threshold_(body_match_threshold),
   min_confirm_frames_(min_confirm_frames),
   min_confirm_duration_sec_(min_confirm_duration_sec),
@@ -30,15 +35,20 @@ FaceEngine::FaceEngine(
   reid_depth_gate_base_m_(depth_gate_base_m)
 {
   scrfd_ = std::make_unique<ScrfdDetector>(
-    scrfd_path
+    scrfd_path,
+    hailo_options
+  );
+  scrfd_->setConfThreshold(scrfd_conf_threshold);
+  scrfd_->setNmsThreshold(scrfd_nms_threshold);
+
+  face_embedder_ = std::make_unique<FaceEmbedder>(
+    face_model_path,
+    hailo_options
   );
 
-  adaface_ = std::make_unique<AdaFaceExtractor>(
-    adaface_path
-  );
-
-  osnet_ = std::make_unique<OsnetExtractor>(
-    osnet_path
+  reid_ = std::make_unique<ReidExtractor>(
+    reid_model_path,
+    hailo_options
   );
 
   last_cleanup_time_ =
@@ -46,8 +56,8 @@ FaceEngine::FaceEngine(
 }
 
 bool FaceEngine::loadModels() {
-  bool ok = scrfd_->init() && adaface_->init() && osnet_->init();
-  if (ok) std::cout << "[FaceEngine] All TensorRT modules initialized successfully." << std::endl;
+  bool ok = scrfd_->init() && face_embedder_->init() && reid_->init();
+  if (ok) std::cout << "[FaceEngine] SCRFD, face embedder and re-ID loaded on the Hailo-8L." << std::endl;
   return ok;
 }
 
@@ -527,81 +537,71 @@ FaceResult FaceEngine::processFace(
 
 
   // --------------------------------------------------------------------------
-  // Step 1: Detect face + landmarks.
+  // Steps 1-2: Detect face + landmarks, then gate on face quality.
+  //
+  // Deferred until after the cached-identity fast paths: on the Pi the SCRFD
+  // result is only needed for deep re-ID (or when landmarks are explicitly
+  // requested on cached frames), which saves a Hailo call per person per frame.
   // --------------------------------------------------------------------------
 
   std::vector<cv::Point2f> landmarks;
+  bool face_detected = false;
+  bool valid_face_quality = false;
 
-  float face_score = 0.0f;
+  auto detect_face = [&]() {
+    float face_score = 0.0f;
 
-
-  const bool face_detected =
-    scrfd_->detect(
-      human_crop,
-      landmarks,
-      face_score
-    );
-
-
-  if (face_detected) {
-    result.landmarks =
-      landmarks;
-  }
-
-
-  // --------------------------------------------------------------------------
-  // Step 2: Face-quality gate.
-  // --------------------------------------------------------------------------
-
-  bool valid_face_quality =
-    false;
-
-
-  if (
-    face_detected &&
-    landmarks.size() == 5)
-  {
-    const float eye_dist =
-      cv::norm(
-        landmarks[0] -
-        landmarks[1]
+    face_detected =
+      scrfd_->detect(
+        human_crop,
+        landmarks,
+        face_score
       );
 
-
-    const bool eye_dist_ok =
-      eye_dist >= 9.0f;
-
-
-    bool landmarks_inside =
-      true;
-
-
-    constexpr float margin =
-      4.0f;
-
-
-    for (const auto& lm : landmarks) {
-
-      if (
-        lm.x < margin ||
-        lm.x >
-          human_crop.cols - margin ||
-        lm.y < margin ||
-        lm.y >
-          human_crop.rows - margin)
-      {
-        landmarks_inside =
-          false;
-
-        break;
-      }
+    if (face_detected) {
+      result.landmarks =
+        landmarks;
     }
 
+    if (
+      face_detected &&
+      landmarks.size() == 5)
+    {
+      const float eye_dist =
+        cv::norm(
+          landmarks[0] -
+          landmarks[1]
+        );
 
-    valid_face_quality =
-      eye_dist_ok &&
-      landmarks_inside;
-  }
+      const bool eye_dist_ok =
+        eye_dist >= 9.0f;
+
+      bool landmarks_inside =
+        true;
+
+      constexpr float margin =
+        4.0f;
+
+      for (const auto& lm : landmarks) {
+        if (
+          lm.x < margin ||
+          lm.x >
+            human_crop.cols - margin ||
+          lm.y < margin ||
+          lm.y >
+            human_crop.rows - margin)
+        {
+          landmarks_inside =
+            false;
+          break;
+        }
+      }
+
+      valid_face_quality =
+        eye_dist_ok &&
+        landmarks_inside;
+    }
+  };
 
 
   // --------------------------------------------------------------------------
@@ -752,6 +752,10 @@ FaceResult FaceEngine::processFace(
       gallery_it !=
       reid_gallery_.end())
     {
+      if (landmarks_on_cached_frames_) {
+        detect_face();
+      }
+
       result.persistent_id =
         cached_persistent_id;
 
@@ -800,6 +804,9 @@ FaceResult FaceEngine::processFace(
       session_it->last_seen =
         now;
 
+      if (landmarks_on_cached_frames_) {
+        detect_face();
+      }
 
       result.persistent_id =
         cached_session_id;
@@ -819,8 +826,10 @@ FaceResult FaceEngine::processFace(
   // Step 4: Deep feature extraction.
   // --------------------------------------------------------------------------
 
+  detect_face();
+
   result.body_embedding =
-    osnet_->extract(
+    reid_->extract(
       human_crop
     );
 
@@ -828,14 +837,14 @@ FaceResult FaceEngine::processFace(
   if (valid_face_quality) {
 
     cv::Mat aligned_face =
-      adaface_->alignFace(
+      face_embedder_->alignFace(
         human_crop,
         landmarks
       );
 
 
     result.face_embedding =
-      adaface_->extract(
+      face_embedder_->extract(
         aligned_face
       );
   }
